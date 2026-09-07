@@ -237,7 +237,7 @@ async def update_table_position(request: Request, table_id: UUID, body: UpdateTa
     uno0uno/warocol.com#2609.
     """
     return await tables_service.update_table_position(
-        request, table_id, pos_x=body.pos_x, pos_y=body.pos_y, zona=body.zona
+        request, table_id, body.model_dump(exclude_unset=True)
     )
 
 

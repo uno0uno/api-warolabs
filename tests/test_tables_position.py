@@ -53,7 +53,7 @@ async def test_update_table_position_persists_single_write():
         patch("app.services.tables_service.get_db_connection", side_effect=_db_context(conn)),
     ):
         result = await tables_service.update_table_position(
-            object(), table_id, pos_x=10.5, pos_y=20.5, zona="terraza"
+            object(), table_id, {"pos_x": 10.5, "pos_y": 20.5, "zona": "terraza"}
         )
 
     query = conn.fetchrow.await_args.args[0]
@@ -63,6 +63,53 @@ async def test_update_table_position_persists_single_write():
     assert result["data"]["pos_x"] == 10.5
     assert result["data"]["pos_y"] == 20.5
     assert result["data"]["zona"] == "terraza"
+
+
+@pytest.mark.asyncio
+async def test_update_table_position_partial_preserves_omitted_fields():
+    tenant_id = uuid4()
+    table_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_position_row(table_id))
+
+    with (
+        patch("app.services.tables_service.require_valid_session", return_value=_session(tenant_id)),
+        patch("app.services.tables_service.get_db_connection", side_effect=_db_context(conn)),
+    ):
+        await tables_service.update_table_position(object(), table_id, {"zona": "salon"})
+
+    query = conn.fetchrow.await_args.args[0]
+    assert "pos_x = $" not in query
+    assert "pos_y = $" not in query
+    assert "zona = $3" in query
+    assert conn.fetchrow.await_args.args[3:] == ("salon",)
+
+
+@pytest.mark.asyncio
+async def test_update_table_position_explicit_null_clears_field():
+    tenant_id = uuid4()
+    table_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_position_row(table_id, zona=None))
+
+    with (
+        patch("app.services.tables_service.require_valid_session", return_value=_session(tenant_id)),
+        patch("app.services.tables_service.get_db_connection", side_effect=_db_context(conn)),
+    ):
+        result = await tables_service.update_table_position(object(), table_id, {"zona": None})
+
+    query = conn.fetchrow.await_args.args[0]
+    assert "zona = $3" in query
+    assert result["data"]["zona"] is None
+
+
+@pytest.mark.asyncio
+async def test_update_table_position_rejects_non_finite_coordinate():
+    with patch("app.services.tables_service.require_valid_session", return_value=_session()):
+        with pytest.raises(APIError) as exc:
+            await tables_service.update_table_position(object(), uuid4(), {"pos_x": float("nan")})
+
+    assert exc.value.status_code == 400
 
 
 @pytest.mark.asyncio
@@ -77,14 +124,14 @@ async def test_update_table_position_not_found_for_cross_tenant():
         patch("app.services.tables_service.get_db_connection", side_effect=_db_context(conn)),
     ):
         with pytest.raises(NotFoundError):
-            await tables_service.update_table_position(object(), table_id, pos_x=1.0)
+            await tables_service.update_table_position(object(), table_id, {"pos_x": 1.0})
 
 
 @pytest.mark.asyncio
 async def test_update_table_position_rejects_long_zona():
     with patch("app.services.tables_service.require_valid_session", return_value=_session()):
         with pytest.raises(APIError) as exc:
-            await tables_service.update_table_position(object(), uuid4(), zona="z" * 51)
+            await tables_service.update_table_position(object(), uuid4(), {"zona": "z" * 51})
 
     assert exc.value.status_code == 400
 

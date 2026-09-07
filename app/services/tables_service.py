@@ -821,12 +821,13 @@ async def reorder_tables(request: Request, table_ids: List[UUID]) -> dict:
 async def update_table_position(
     request: Request,
     table_id: UUID,
-    pos_x: Optional[float] = None,
-    pos_y: Optional[float] = None,
-    zona: Optional[str] = None,
+    updates: dict,
 ) -> dict:
     """
     Persist floor-plan position for one tenant table (debounce-friendly, single write per drop).
+    Partial update: only keys present in ``updates`` are applied
+    (router passes ``body.model_dump(exclude_unset=True)``) — explicit null
+    clears a field, omitted fields are preserved.
     uno0uno/warocol.com#2609 — bar tables are positionable (unlike reorder which pins Barra).
     """
     try:
@@ -835,23 +836,42 @@ async def update_table_position(
         if not tenant_id:
             raise AuthenticationError("Tenant ID is required")
 
-        if zona is not None and len(zona) > 50:
+        allowed = {"pos_x", "pos_y", "zona"}
+        updates = {k: v for k, v in (updates or {}).items() if k in allowed}
+
+        if "zona" in updates and updates["zona"] is not None and len(updates["zona"]) > 50:
             raise APIError("zona must be at most 50 characters", status_code=400)
+        for coord in ("pos_x", "pos_y"):
+            value = updates.get(coord)
+            if value is not None and (not isinstance(value, (int, float)) or value != value or value in (float("inf"), float("-inf"))):
+                raise APIError(f"{coord} must be a finite number", status_code=400)
 
         async with get_db_connection() as conn:
+            if not updates:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, name, code, capacity, status, is_active, is_bar,
+                           qr_enabled, qr_public_token, display_order, pos_x, pos_y, zona, created_at
+                    FROM tables WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+                    """,
+                    table_id,
+                    tenant_id,
+                )
+                if not row:
+                    raise NotFoundError("Table not found")
+                return {"success": True, "data": _format_table_simple(row)}
+
+            set_clauses = [f"{col} = ${idx}" for idx, col in enumerate(updates, start=3)]
+            params: List[Any] = [table_id, tenant_id, *updates.values()]
             row = await conn.fetchrow(
-                """
+                f"""
                 UPDATE tables
-                SET pos_x = $3, pos_y = $4, zona = $5
+                SET {", ".join(set_clauses)}
                 WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
                 RETURNING id, name, code, capacity, status, is_active, is_bar,
                           qr_enabled, qr_public_token, display_order, pos_x, pos_y, zona, created_at
                 """,
-                table_id,
-                tenant_id,
-                pos_x,
-                pos_y,
-                zona,
+                *params,
             )
             if not row:
                 raise NotFoundError("Table not found")
