@@ -557,6 +557,9 @@ async def list_tables(request: Request, include_inactive: bool = False) -> dict:
                     t.qr_enabled,
                     t.qr_public_token,
                     t.display_order,
+                    t.pos_x,
+                    t.pos_y,
+                    t.zona,
                     t.created_at,
                     t.assigned_member_id,
                     p_assigned.name AS assigned_member_name,
@@ -689,7 +692,7 @@ async def create_table(
                     INSERT INTO tables (tenant_id, name, capacity, code, display_order)
                     VALUES ($1, $2, $3, $4, $5)
                     RETURNING id, name, code, capacity, status, is_active, is_bar,
-                              qr_enabled, qr_public_token, display_order, created_at
+                              qr_enabled, qr_public_token, display_order, pos_x, pos_y, zona, created_at
                     """,
                     tenant_id,
                     name,
@@ -713,7 +716,7 @@ async def create_table(
                         SET qr_public_token = $1
                         WHERE id = $2 AND tenant_id = $3
                         RETURNING id, name, code, capacity, status, is_active, is_bar,
-                                  qr_enabled, qr_public_token, display_order, created_at
+                                  qr_enabled, qr_public_token, display_order, pos_x, pos_y, zona, created_at
                         """,
                         token,
                         row["id"],
@@ -815,6 +818,78 @@ async def reorder_tables(request: Request, table_ids: List[UUID]) -> dict:
         raise APIError(f"Error reordering tables: {e}", status_code=500)
 
 
+async def update_table_position(
+    request: Request,
+    table_id: UUID,
+    updates: dict,
+) -> dict:
+    """
+    Persist floor-plan position for one tenant table (debounce-friendly, single write per drop).
+    Partial update: only keys present in ``updates`` are applied
+    (router passes ``body.model_dump(exclude_unset=True)``) — explicit null
+    clears a field, omitted fields are preserved.
+    uno0uno/warocol.com#2609 — bar tables are positionable (unlike reorder which pins Barra).
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        allowed = {"pos_x", "pos_y", "zona"}
+        updates = {k: v for k, v in (updates or {}).items() if k in allowed}
+
+        if "zona" in updates and updates["zona"] is not None and len(updates["zona"]) > 50:
+            raise APIError("zona must be at most 50 characters", status_code=400)
+        for coord in ("pos_x", "pos_y"):
+            value = updates.get(coord)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or value != value
+                or value in (float("inf"), float("-inf"))
+            ):
+                raise APIError(f"{coord} must be a finite number", status_code=400)
+
+        async with get_db_connection() as conn:
+            if not updates:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, name, code, capacity, status, is_active, is_bar,
+                           qr_enabled, qr_public_token, display_order, pos_x, pos_y, zona, created_at
+                    FROM tables WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+                    """,
+                    table_id,
+                    tenant_id,
+                )
+                if not row:
+                    raise NotFoundError("Table not found")
+                return {"success": True, "data": _format_table_simple(row)}
+
+            set_clauses = [f"{col} = ${idx}" for idx, col in enumerate(updates, start=3)]
+            params: List[Any] = [table_id, tenant_id, *updates.values()]
+            row = await conn.fetchrow(
+                f"""
+                UPDATE tables
+                SET {", ".join(set_clauses)}
+                WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+                RETURNING id, name, code, capacity, status, is_active, is_bar,
+                          qr_enabled, qr_public_token, display_order, pos_x, pos_y, zona, created_at
+                """,
+                *params,
+            )
+            if not row:
+                raise NotFoundError("Table not found")
+
+        return {"success": True, "data": _format_table_simple(row)}
+
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error updating table position {table_id}: {e}")
+        raise APIError(f"Error updating table position: {e}", status_code=500)
+
+
 async def update_table(
     request: Request,
     table_id: UUID,
@@ -847,7 +922,7 @@ async def update_table(
                 row = await conn.fetchrow(
                     """
                     SELECT id, name, code, capacity, status, is_active, is_bar,
-                           qr_enabled, qr_public_token, display_order, created_at
+                           qr_enabled, qr_public_token, display_order, pos_x, pos_y, zona, created_at
                     FROM tables WHERE id = $1 AND tenant_id = $2
                     """,
                     table_id,
@@ -911,7 +986,7 @@ async def update_table(
                 SET {", ".join(set_clauses)}
                 WHERE id = $1 AND tenant_id = $2
                 RETURNING id, name, code, capacity, status, is_active, is_bar,
-                          qr_enabled, qr_public_token, display_order, created_at
+                          qr_enabled, qr_public_token, display_order, pos_x, pos_y, zona, created_at
                 """,
                 *params,
             )
@@ -5615,6 +5690,9 @@ def _format_table_row(row: dict) -> dict:
         "code": row.get("code"),
         "capacity": row["capacity"],
         "display_order": row.get("display_order"),
+        "pos_x": float(row["pos_x"]) if row.get("pos_x") is not None else None,
+        "pos_y": float(row["pos_y"]) if row.get("pos_y") is not None else None,
+        "zona": row.get("zona"),
         "status": row["status"],
         "is_active": row["is_active"],
         "is_bar": bool(row["is_bar"]) if row.get("is_bar") is not None else False,
@@ -5870,6 +5948,9 @@ def _format_table_simple(row: dict) -> dict:
         "code": row.get("code"),
         "capacity": row["capacity"],
         "display_order": row.get("display_order"),
+        "pos_x": float(row["pos_x"]) if row.get("pos_x") is not None else None,
+        "pos_y": float(row["pos_y"]) if row.get("pos_y") is not None else None,
+        "zona": row.get("zona"),
         "status": row["status"],
         "is_active": row["is_active"],
         "created_at": row["created_at"].isoformat(),
