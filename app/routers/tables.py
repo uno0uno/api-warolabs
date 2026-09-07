@@ -91,6 +91,12 @@ class ReorderTablesRequest(BaseModel):
     table_ids: List[UUID] = Field(..., min_length=1)
 
 
+class UpdateTablePositionRequest(BaseModel):
+    pos_x: Optional[float] = Field(None, description="Floor-plan X coordinate; null clears")
+    pos_y: Optional[float] = Field(None, description="Floor-plan Y coordinate; null clears")
+    zona: Optional[str] = Field(None, max_length=50, description="Floor-plan zone; null clears")
+
+
 @router.get("", dependencies=[Depends(require_module(Module.POS))])
 async def list_tables(request: Request, include_inactive: bool = Query(False)):
     """
@@ -116,6 +122,17 @@ async def reorder_tables(request: Request, body: ReorderTablesRequest):
     Barra is fixed/protected and cannot be included.
     """
     return await tables_service.reorder_tables(request, body.table_ids)
+
+
+@router.patch("/{table_id}/position", dependencies=[Depends(require_module(Module.POS))])
+async def update_table_position(request: Request, table_id: UUID, body: UpdateTablePositionRequest):
+    """
+    Persist floor-plan position for one table (debounce-friendly, single write per drop).
+    uno0uno/warocol.com#2609.
+    """
+    return await tables_service.update_table_position(
+        request, table_id, pos_x=body.pos_x, pos_y=body.pos_y, zona=body.zona
+    )
 
 
 @router.put("/{table_id}", dependencies=[Depends(require_module(Module.POS))])
