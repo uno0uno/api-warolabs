@@ -843,7 +843,12 @@ async def update_table_position(
             raise APIError("zona must be at most 50 characters", status_code=400)
         for coord in ("pos_x", "pos_y"):
             value = updates.get(coord)
-            if value is not None and (not isinstance(value, (int, float)) or value != value or value in (float("inf"), float("-inf"))):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or value != value
+                or value in (float("inf"), float("-inf"))
+            ):
                 raise APIError(f"{coord} must be a finite number", status_code=400)
 
         async with get_db_connection() as conn:

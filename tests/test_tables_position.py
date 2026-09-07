@@ -113,6 +113,26 @@ async def test_update_table_position_rejects_non_finite_coordinate():
 
 
 @pytest.mark.asyncio
+async def test_update_table_position_empty_dict_returns_current_without_write():
+    tenant_id = uuid4()
+    table_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_position_row(table_id))
+
+    with (
+        patch("app.services.tables_service.require_valid_session", return_value=_session(tenant_id)),
+        patch("app.services.tables_service.get_db_connection", side_effect=_db_context(conn)),
+    ):
+        result = await tables_service.update_table_position(object(), table_id, {})
+
+    query = conn.fetchrow.await_args.args[0]
+    assert "UPDATE" not in query
+    assert "SELECT" in query
+    assert result["data"]["pos_x"] == 10.5
+    assert result["data"]["zona"] == "terraza"
+
+
+@pytest.mark.asyncio
 async def test_update_table_position_not_found_for_cross_tenant():
     tenant_id = uuid4()
     table_id = uuid4()
