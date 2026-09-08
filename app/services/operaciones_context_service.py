@@ -41,6 +41,7 @@ ALLOWED_TOGGLES = frozenset({
     "expediter_enabled",
     "tables_enabled",
     "table_qr_module_enabled",
+    "floor_canvas_enabled",  # warocol.com#2622
     "auto_select_generic_enabled",
     "waiter_attribution_enabled",  # warocol.com#573
     "tip_enabled",                  # warocol.com#638

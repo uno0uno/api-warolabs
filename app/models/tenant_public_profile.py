@@ -102,6 +102,13 @@ class TenantPublicProfileBase(BaseModel):
                     "diner self-order with staff confirmation in Despacho.",
     )
 
+    # Free floor-plan canvas (warocol.com#2622)
+    floor_canvas_enabled: bool = Field(
+        False,
+        description="When true, POS shows the free floor-plan canvas instead of the zone matrix. "
+                    "Default false preserves current behaviour.",
+    )
+
     # KDS / Comandas module flags
     comandas_enabled: bool = Field(False, description="Whether the comandas/KDS module is enabled. When false, system behaves exactly as today.")
     kds_enabled: bool = Field(False, description="Whether KDS station screens (/cocina/[id]) are enabled. Requires comandas_enabled=true.")
