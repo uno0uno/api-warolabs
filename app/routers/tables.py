@@ -241,6 +241,42 @@ async def update_table_position(request: Request, table_id: UUID, body: UpdateTa
     )
 
 
+class CreateFloorWallRequest(BaseModel):
+    zona: str = Field(..., max_length=50, description="Zone the wall belongs to")
+    x1: float = Field(..., description="Segment start X")
+    y1: float = Field(..., description="Segment start Y")
+    x2: float = Field(..., description="Segment end X")
+    y2: float = Field(..., description="Segment end Y")
+
+
+@router.get("/walls", dependencies=[Depends(require_module(Module.POS))])
+async def list_floor_walls(request: Request):
+    """
+    List floor-plan wall segments for the tenant (visual reference only).
+    Static route defined before /{table_id} routes to avoid shadowing.
+    uno0uno/warocol.com#2614.
+    """
+    return await tables_service.list_floor_walls(request)
+
+
+@router.post("/walls", dependencies=[Depends(require_module(Module.POS))])
+async def create_floor_wall(request: Request, body: CreateFloorWallRequest):
+    """
+    Create one floor-plan wall segment for the tenant.
+    uno0uno/warocol.com#2614.
+    """
+    return await tables_service.create_floor_wall(request, body.model_dump())
+
+
+@router.delete("/walls/{wall_id}", dependencies=[Depends(require_module(Module.POS))])
+async def delete_floor_wall(request: Request, wall_id: UUID):
+    """
+    Delete one floor-plan wall segment (tenant-scoped).
+    uno0uno/warocol.com#2614.
+    """
+    return await tables_service.delete_floor_wall(request, wall_id)
+
+
 @router.put("/{table_id}", dependencies=[Depends(require_module(Module.POS))])
 async def update_table(request: Request, table_id: UUID, body: UpdateTableRequest):
     """
