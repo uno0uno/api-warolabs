@@ -890,15 +890,190 @@ async def update_table_position(
         raise APIError(f"Error updating table position: {e}", status_code=500)
 
 
-async def update_table(
-    request: Request,
-    table_id: UUID,
-    updates: dict,
-) -> dict:
+def _format_floor_wall(row: dict) -> dict:
+    return {
+        "id": str(row["id"]),
+        "zona": row["zona"],
+        "x1": float(row["x1"]),
+        "y1": float(row["y1"]),
+        "x2": float(row["x2"]),
+        "y2": float(row["y2"]),
+    }
+
+
+def _validate_wall_coords(payload: dict) -> None:
+    for coord in ("x1", "y1", "x2", "y2"):
+        if coord not in payload:
+            continue
+        value = payload.get(coord)
+        if (
+            value is None
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or value != value
+            or value in (float("inf"), float("-inf"))
+        ):
+            raise APIError(f"{coord} must be a finite number", status_code=400)
+    if "zona" in payload:
+        zona = payload.get("zona")
+        if not isinstance(zona, str) or not zona.strip() or len(zona) > 50:
+            raise APIError("zona must be a non-empty string of at most 50 characters", status_code=400)
+
+
+async def list_floor_walls(request: Request) -> dict:
     """
-    Update a table's name, code, and/or capacity (status is NOT editable here).
-    Only keys present in ``updates`` are applied (see router model_dump exclude_unset).
+    List floor-plan walls for the tenant (visual reference only).
+    uno0uno/warocol.com#2614
     """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, zona, x1, y1, x2, y2
+                FROM floor_walls
+                WHERE tenant_id = $1
+                ORDER BY zona, created_at
+                """,
+                tenant_id,
+            )
+
+        return {"success": True, "data": [_format_floor_wall(r) for r in rows]}
+
+    except AuthenticationError:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing floor walls: {e}")
+        raise APIError(f"Error listing floor walls: {e}", status_code=500)
+
+
+async def create_floor_wall(request: Request, payload: dict) -> dict:
+    """
+    Create one floor-plan wall segment for the tenant.
+    uno0uno/warocol.com#2614
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        _validate_wall_coords(payload)
+
+        async with get_db_connection() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO floor_walls (tenant_id, zona, x1, y1, x2, y2)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING id, zona, x1, y1, x2, y2
+                """,
+                tenant_id,
+                payload["zona"].strip(),
+                payload["x1"],
+                payload["y1"],
+                payload["x2"],
+                payload["y2"],
+            )
+
+        return {"success": True, "data": _format_floor_wall(row)}
+
+    except (AuthenticationError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error creating floor wall: {e}")
+        raise APIError(f"Error creating floor wall: {e}", status_code=500)
+
+
+async def delete_floor_wall(request: Request, wall_id: UUID) -> dict:
+    """
+    Delete one floor-plan wall segment (tenant-scoped, hard delete: editor-owned reference data).
+    uno0uno/warocol.com#2614
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        async with get_db_connection() as conn:
+            deleted = await conn.fetchval(
+                """
+                DELETE FROM floor_walls
+                WHERE id = $1 AND tenant_id = $2
+                RETURNING id
+                """,
+                wall_id,
+                tenant_id,
+            )
+            if not deleted:
+                raise NotFoundError("Wall not found")
+
+        return {"success": True, "data": {"id": str(wall_id)}}
+
+    except (AuthenticationError, NotFoundError):
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting floor wall {wall_id}: {e}")
+        raise APIError(f"Error deleting floor wall: {e}", status_code=500)
+
+
+async def update_floor_wall(request: Request, wall_id: UUID, updates: dict) -> dict:
+    """
+    Partial update of one floor-plan wall segment (move/resize).
+    Only keys present in ``updates`` are applied; explicit coords validated as finite.
+    uno0uno/warocol.com#2614
+    """
+    try:
+        session_context = require_valid_session(request)
+        tenant_id = session_context.tenant_id
+        if not tenant_id:
+            raise AuthenticationError("Tenant ID is required")
+
+        allowed = {"zona", "x1", "y1", "x2", "y2"}
+        updates = {k: v for k, v in (updates or {}).items() if k in allowed}
+        _validate_wall_coords(updates)
+
+        async with get_db_connection() as conn:
+            if not updates:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, zona, x1, y1, x2, y2
+                    FROM floor_walls WHERE id = $1 AND tenant_id = $2
+                    """,
+                    wall_id,
+                    tenant_id,
+                )
+                if not row:
+                    raise NotFoundError("Wall not found")
+                return {"success": True, "data": _format_floor_wall(row)}
+
+            if "zona" in updates:
+                updates = {**updates, "zona": updates["zona"].strip()}
+            set_clauses = [f"{col} = ${idx}" for idx, col in enumerate(updates, start=3)]
+            params: List[Any] = [wall_id, tenant_id, *updates.values()]
+            row = await conn.fetchrow(
+                f"""
+                UPDATE floor_walls
+                SET {", ".join(set_clauses)}
+                WHERE id = $1 AND tenant_id = $2
+                RETURNING id, zona, x1, y1, x2, y2
+                """,
+                *params,
+            )
+            if not row:
+                raise NotFoundError("Wall not found")
+
+        return {"success": True, "data": _format_floor_wall(row)}
+
+    except (AuthenticationError, NotFoundError, APIError):
+        raise
+    except Exception as e:
+        logger.error(f"Error updating floor wall {wall_id}: {e}")
+        raise APIError(f"Error updating floor wall: {e}", status_code=500)
     try:
         session_context = require_valid_session(request)
         tenant_id = session_context.tenant_id
