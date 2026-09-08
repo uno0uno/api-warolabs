@@ -114,3 +114,43 @@ async def test_delete_floor_wall_scoped_and_404():
     ):
         with pytest.raises(NotFoundError):
             await tables_service.delete_floor_wall(object(), wall_id)
+
+
+@pytest.mark.asyncio
+async def test_update_floor_wall_partial_move():
+    tenant_id = uuid4()
+    wall_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=_wall_row(wall_id))
+
+    with (
+        patch("app.services.tables_service.require_valid_session", return_value=_session(tenant_id)),
+        patch("app.services.tables_service.get_db_connection", side_effect=_db_context(conn)),
+    ):
+        result = await tables_service.update_floor_wall(object(), wall_id, {"x2": 8.0})
+
+    query = conn.fetchrow.await_args.args[0]
+    assert "UPDATE floor_walls" in query
+    assert "x2 = $3" in query
+    assert "tenant_id = $2" in query
+    assert result["data"]["id"] == str(wall_id)
+
+
+@pytest.mark.asyncio
+async def test_update_floor_wall_404_and_400():
+    tenant_id = uuid4()
+    wall_id = uuid4()
+    conn = MagicMock()
+    conn.fetchrow = AsyncMock(return_value=None)
+
+    with (
+        patch("app.services.tables_service.require_valid_session", return_value=_session(tenant_id)),
+        patch("app.services.tables_service.get_db_connection", side_effect=_db_context(conn)),
+    ):
+        with pytest.raises(NotFoundError):
+            await tables_service.update_floor_wall(object(), wall_id, {"x1": 1.0})
+
+    with patch("app.services.tables_service.require_valid_session", return_value=_session()):
+        with pytest.raises(APIError) as exc:
+            await tables_service.update_floor_wall(object(), wall_id, {"y1": float("inf")})
+        assert exc.value.status_code == 400

@@ -277,6 +277,25 @@ async def delete_floor_wall(request: Request, wall_id: UUID):
     return await tables_service.delete_floor_wall(request, wall_id)
 
 
+class UpdateFloorWallRequest(BaseModel):
+    zona: Optional[str] = Field(None, max_length=50)
+    x1: Optional[float] = None
+    y1: Optional[float] = None
+    x2: Optional[float] = None
+    y2: Optional[float] = None
+
+
+@router.patch("/walls/{wall_id}", dependencies=[Depends(require_module(Module.POS))])
+async def update_floor_wall(request: Request, wall_id: UUID, body: UpdateFloorWallRequest):
+    """
+    Partially update one floor-plan wall segment (move/resize).
+    uno0uno/warocol.com#2614.
+    """
+    return await tables_service.update_floor_wall(
+        request, wall_id, body.model_dump(exclude_unset=True)
+    )
+
+
 @router.put("/{table_id}", dependencies=[Depends(require_module(Module.POS))])
 async def update_table(request: Request, table_id: UUID, body: UpdateTableRequest):
     """
