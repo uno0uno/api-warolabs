@@ -288,6 +288,16 @@ async def toggle_table_qr_module(request: Request, body: ToggleRequest):
 
 
 @router.patch(
+    "/toggles/floor-canvas",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def toggle_floor_canvas(request: Request, body: ToggleRequest):
+    """Toggle `floor_canvas_enabled` on the tenant profile (warocol.com#2622)."""
+    session = require_valid_session(request)
+    return await update_toggle(session.tenant_id, "floor_canvas_enabled", body.enabled)
+
+
+@router.patch(
     "/toggles/auto-select-generic",
     dependencies=[Depends(require_module(Module.OPERACIONES))],
 )
