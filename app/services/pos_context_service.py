@@ -125,6 +125,12 @@ _CONTEXT_QUERY_WITHOUT_UI_LOCALE_OR_POS_CATALOG = (
     .replace("    tpp.hide_products_without_stock,\n", "    NULL AS hide_products_without_stock,\n")
 )
 
+# warocol.com#2623 — newest column; fall back before older prefs
+_CONTEXT_QUERY_WITHOUT_FLOOR_CANVAS = _CONTEXT_QUERY.replace(
+    "    tpp.floor_canvas_enabled,\n",
+    "    NULL AS floor_canvas_enabled,\n",
+)
+
 # warocol.com#2574 — newest column; fall back before older prefs
 _CONTEXT_QUERY_WITHOUT_HIDE_WITHOUT_STOCK = _CONTEXT_QUERY.replace(
     "    tpp.hide_products_without_stock,\n",
@@ -178,7 +184,25 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             row = await conn.fetchrow(_CONTEXT_QUERY, tenant_id)
         except asyncpg.UndefinedColumnError as exc:
             missing = str(exc)
-            if "hide_products_without_stock" in missing:
+            if "floor_canvas_enabled" in missing:
+                logger.warning(
+                    "floor_canvas_enabled missing in POS context; "
+                    "defaulting false (warocol.com#2623)."
+                )
+                try:
+                    row = await conn.fetchrow(
+                        _CONTEXT_QUERY_WITHOUT_FLOOR_CANVAS,
+                        tenant_id,
+                    )
+                except asyncpg.UndefinedColumnError:
+                    row = await conn.fetchrow(
+                        _CONTEXT_QUERY_WITHOUT_PREFS.replace(
+                            "    tpp.floor_canvas_enabled,\n",
+                            "    NULL AS floor_canvas_enabled,\n",
+                        ),
+                        tenant_id,
+                    )
+            elif "hide_products_without_stock" in missing:
                 logger.warning(
                     "hide_products_without_stock missing in POS context; "
                     "defaulting false (warocol.com#2574)."
@@ -363,7 +387,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
         'expediter_enabled': bool(row['expediter_enabled']) if row['expediter_enabled'] is not None else False,
         'tables_enabled': bool(row['tables_enabled']) if row['tables_enabled'] is not None else False,
         'table_qr_module_enabled': bool(row['table_qr_module_enabled']) if row['table_qr_module_enabled'] is not None else False,
-        'floor_canvas_enabled': bool(row['floor_canvas_enabled']) if row and 'floor_canvas_enabled' in row and row['floor_canvas_enabled'] is not None else False,
+        'floor_canvas_enabled': bool(row['floor_canvas_enabled']) if 'floor_canvas_enabled' in row and row['floor_canvas_enabled'] is not None else False,
         'accepts_online_orders': bool(row['accepts_online_orders']) if row['accepts_online_orders'] is not None else False,
         'auto_select_generic_enabled': bool(row['auto_select_generic_enabled']) if row['auto_select_generic_enabled'] is not None else False,
         'open_sale_enabled': bool(row['open_sale_enabled']) if row['open_sale_enabled'] is not None else False,
