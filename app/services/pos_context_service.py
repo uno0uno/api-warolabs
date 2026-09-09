@@ -222,7 +222,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                             _CONTEXT_QUERY_WITHOUT_DEDUCT_ON_COMMAND,
                             tenant_id,
                         )
-                    elif "pos_catalog" in missing or "pos_show_" in missing:
+                    elif "pos_catalog" in missing or "pos_show_" in missing or "pos_tables" in missing:
                         row = await conn.fetchrow(
                             _CONTEXT_QUERY_WITHOUT_POS_CATALOG,
                             tenant_id,
@@ -246,7 +246,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                     )
                 except asyncpg.UndefinedColumnError as nested:
                     missing = str(nested)
-                    if "pos_catalog" in missing or "pos_show_" in missing:
+                    if "pos_catalog" in missing or "pos_show_" in missing or "pos_tables" in missing:
                         row = await conn.fetchrow(
                             _CONTEXT_QUERY_WITHOUT_POS_CATALOG,
                             tenant_id,
@@ -258,7 +258,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                             else _CONTEXT_QUERY_WITHOUT_PREFS,
                             tenant_id,
                         )
-            elif "pos_catalog" in missing or "pos_show_" in missing:
+            elif "pos_catalog" in missing or "pos_show_" in missing or "pos_tables" in missing:
                 logger.warning(
                     "POS catalog preference columns missing in POS context; "
                     "using defaults until warocol.com#2495 migration is applied."
@@ -317,7 +317,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                             ),
                             tenant_id,
                         )
-                    elif "pos_catalog" in inner or "pos_show_" in inner:
+                    elif "pos_catalog" in inner or "pos_show_" in inner or "pos_tables" in inner:
                         row = await conn.fetchrow(
                             _CONTEXT_QUERY_WITHOUT_UI_LOCALE_OR_POS_CATALOG,
                             tenant_id,
