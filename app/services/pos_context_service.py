@@ -63,6 +63,7 @@ SELECT
     tpp.promo_conflict_strategy,
     tpp.promo_type_block_map,
     tpp.pos_catalog_layout_default,
+    tpp.pos_tables_layout_default,
     tpp.pos_show_product_image,
     tpp.pos_show_search,
     tpp.deduct_inventory_on_command,
@@ -111,6 +112,7 @@ _CONTEXT_QUERY_WITHOUT_UI_LOCALE = _CONTEXT_QUERY.replace(
 _CONTEXT_QUERY_WITHOUT_POS_CATALOG = (
     _CONTEXT_QUERY
     .replace("    tpp.pos_catalog_layout_default,\n", "    NULL AS pos_catalog_layout_default,\n")
+    .replace("    tpp.pos_tables_layout_default,\n", "    NULL AS pos_tables_layout_default,\n")
     .replace("    tpp.pos_show_product_image,\n", "    NULL AS pos_show_product_image,\n")
     .replace("    tpp.pos_show_search,\n", "    NULL AS pos_show_search,\n")
     .replace("    tpp.deduct_inventory_on_command,\n", "    NULL AS deduct_inventory_on_command,\n")
@@ -119,6 +121,7 @@ _CONTEXT_QUERY_WITHOUT_POS_CATALOG = (
 _CONTEXT_QUERY_WITHOUT_UI_LOCALE_OR_POS_CATALOG = (
     _CONTEXT_QUERY_WITHOUT_UI_LOCALE
     .replace("    tpp.pos_catalog_layout_default,\n", "    NULL AS pos_catalog_layout_default,\n")
+    .replace("    tpp.pos_tables_layout_default,\n", "    NULL AS pos_tables_layout_default,\n")
     .replace("    tpp.pos_show_product_image,\n", "    NULL AS pos_show_product_image,\n")
     .replace("    tpp.pos_show_search,\n", "    NULL AS pos_show_search,\n")
     .replace("    tpp.deduct_inventory_on_command,\n", "    NULL AS deduct_inventory_on_command,\n")
@@ -219,7 +222,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                             _CONTEXT_QUERY_WITHOUT_DEDUCT_ON_COMMAND,
                             tenant_id,
                         )
-                    elif "pos_catalog" in missing or "pos_show_" in missing:
+                    elif "pos_catalog" in missing or "pos_show_" in missing or "pos_tables" in missing:
                         row = await conn.fetchrow(
                             _CONTEXT_QUERY_WITHOUT_POS_CATALOG,
                             tenant_id,
@@ -243,7 +246,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                     )
                 except asyncpg.UndefinedColumnError as nested:
                     missing = str(nested)
-                    if "pos_catalog" in missing or "pos_show_" in missing:
+                    if "pos_catalog" in missing or "pos_show_" in missing or "pos_tables" in missing:
                         row = await conn.fetchrow(
                             _CONTEXT_QUERY_WITHOUT_POS_CATALOG,
                             tenant_id,
@@ -255,7 +258,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                             else _CONTEXT_QUERY_WITHOUT_PREFS,
                             tenant_id,
                         )
-            elif "pos_catalog" in missing or "pos_show_" in missing:
+            elif "pos_catalog" in missing or "pos_show_" in missing or "pos_tables" in missing:
                 logger.warning(
                     "POS catalog preference columns missing in POS context; "
                     "using defaults until warocol.com#2495 migration is applied."
@@ -314,7 +317,7 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
                             ),
                             tenant_id,
                         )
-                    elif "pos_catalog" in inner or "pos_show_" in inner:
+                    elif "pos_catalog" in inner or "pos_show_" in inner or "pos_tables" in inner:
                         row = await conn.fetchrow(
                             _CONTEXT_QUERY_WITHOUT_UI_LOCALE_OR_POS_CATALOG,
                             tenant_id,
@@ -429,6 +432,15 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             if (
                 'pos_catalog_layout_default' in row.keys()
                 and row['pos_catalog_layout_default'] in ('grid', 'list')
+            )
+            else 'grid'
+        ),
+        # uno0uno/warocol.com#2641 — POS tables default view (tenant-wide)
+        'pos_tables_layout_default': (
+            row['pos_tables_layout_default']
+            if (
+                'pos_tables_layout_default' in row.keys()
+                and row['pos_tables_layout_default'] in ('grid', 'list', 'canvas')
             )
             else 'grid'
         ),

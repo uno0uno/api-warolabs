@@ -55,6 +55,7 @@ ALLOWED_TOGGLES = frozenset({
 })
 
 ALLOWED_POS_CATALOG_LAYOUTS = frozenset({"grid", "list"})
+ALLOWED_POS_TABLES_LAYOUTS = frozenset({"grid", "list", "canvas"})
 
 
 async def get_operaciones_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
@@ -174,6 +175,42 @@ async def update_pos_catalog_layout(
     return {
         "success": True,
         "data": {"pos_catalog_layout_default": row["pos_catalog_layout_default"]},
+    }
+
+
+async def update_pos_tables_layout(
+    tenant_id: UUID,
+    layout: str,
+) -> Dict[str, Any]:
+    """Persist tenant default POS tables view (uno0uno/warocol.com#2641)."""
+    normalized = (layout or "").strip().lower()
+    if normalized not in ALLOWED_POS_TABLES_LAYOUTS:
+        raise HTTPException(
+            status_code=422,
+            detail="pos_tables_layout_default must be one of: grid, list, canvas",
+        )
+
+    query = """
+        INSERT INTO tenant_public_profiles (
+            tenant_id, slug, display_name, pos_tables_layout_default
+        )
+        SELECT t.id, t.slug, t.name, $2
+        FROM tenants t
+        WHERE t.id = $1
+        ON CONFLICT (tenant_id) DO UPDATE
+            SET pos_tables_layout_default = EXCLUDED.pos_tables_layout_default,
+                updated_at = now()
+        RETURNING pos_tables_layout_default
+    """
+
+    async with get_db_connection() as conn:
+        row = await conn.fetchrow(query, tenant_id, normalized)
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return {
+        "success": True,
+        "data": {"pos_tables_layout_default": row["pos_tables_layout_default"]},
     }
 
 
