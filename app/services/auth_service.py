@@ -537,10 +537,14 @@ async def update_profile(
             try:
                 result = await conn.fetchrow(update_query, *values)
             except asyncpg.UndefinedColumnError:
-                if 'pos_catalog_layout_override' not in provided_fields and 'pos_tables_layout_override' not in provided_fields:
+                if 'pos_tables_layout_override' in provided_fields and 'pos_catalog_layout_override' not in provided_fields:
+                    raise AuthenticationError(
+                        "POS tables layout preference is not available yet"
+                    ) from None
+                if 'pos_catalog_layout_override' not in provided_fields:
                     raise
                 raise AuthenticationError(
-                    "POS layout preference is not available yet"
+                    "POS catalog layout preference is not available yet"
                 ) from None
 
             if not result:
