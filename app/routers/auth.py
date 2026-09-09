@@ -191,6 +191,7 @@ async def update_profile_endpoint(request: Request, payload: UpdateProfileReques
         description=payload.description,
         preferred_locale=payload.preferred_locale,
         pos_catalog_layout_override=payload.pos_catalog_layout_override,
+        pos_tables_layout_override=payload.pos_tables_layout_override,
         fields_set=payload.model_fields_set,
     )
 
