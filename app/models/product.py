@@ -72,7 +72,8 @@ class ProductBase(BaseModel):
     """Base product fields"""
     name: str = Field(..., min_length=1, max_length=255, description="Product name")
     description: Optional[str] = Field(None, description="Product description")
-    price: Decimal = Field(..., gt=0, description="Sale price")
+    price: Decimal = Field(..., ge=0, description="Sale price (0 only when es_cortesia)")
+    es_cortesia: bool = Field(False, description="Courtesy product: may be sold at price 0 (uno0uno/warocol.com#2654)")
     category_id: UUID = Field(..., description="Category ID")
     product_base_type_id: Optional[UUID] = Field(None, description="Optional recipe base type ID (deprecated, use recipe_base_ids)")
     preparation_time: Optional[int] = Field(None, ge=0, description="Preparation time in minutes")
@@ -134,6 +135,12 @@ class ProductCreate(ProductBase):
         ge=0,
         description="Operational/perceived unit cost set by the tenant",
     )
+
+    @model_validator(mode="after")
+    def validate_cortesia_price(self):
+        if self.price == 0 and not self.es_cortesia:
+            raise ValueError("price 0 requires es_cortesia=true")
+        return self
     auto_resale_ingredient: bool = Field(
         False,
         description=(
@@ -201,7 +208,8 @@ class ProductUpdate(BaseModel):
     """Update product fields"""
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = None
-    price: Optional[Decimal] = Field(None, gt=0)
+    price: Optional[Decimal] = Field(None, ge=0)
+    es_cortesia: Optional[bool] = Field(None, description="Courtesy flag (uno0uno/warocol.com#2654)")
     category_id: Optional[UUID] = None
     product_base_type_id: Optional[UUID] = Field(None, description="Optional recipe base type ID (deprecated)")
     recipe_base_ids: Optional[List[UUID]] = Field(None, description="DEPRECATED: List of recipe base IDs (each treated as quantity=1). Prefer recipe_bases.")
@@ -234,6 +242,12 @@ class ProductUpdate(BaseModel):
         ge=0,
         description="Operational/perceived unit cost (null clears)",
     )
+
+    @model_validator(mode="after")
+    def validate_cortesia_price(self):
+        if self.price == 0 and self.es_cortesia is False:
+            raise ValueError("price 0 requires es_cortesia=true")
+        return self
 
 class Product(ProductBase):
     """Complete product with calculated fields"""

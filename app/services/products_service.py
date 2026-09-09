@@ -171,6 +171,8 @@ async def create_product_with_recipe(
             # Start transaction
             async with conn.transaction():
                 await check_plan_quota_growth(conn, tenant_id, "menu_products")
+                if product_data.price == 0 and not product_data.es_cortesia:
+                    raise APIError("price 0 requires es_cortesia=true", status_code=400)
                 if product_data.open_priced:
                     await assert_single_open_priced_per_tenant(conn, tenant_id)
 
@@ -207,13 +209,13 @@ async def create_product_with_recipe(
                 # NOTE: controla_stock is ALWAYS True - all products control inventory
                 product_query = """
                     INSERT INTO product (
-                        name, description, price, category_id, product_base_type_id, preparation_time,
+                        name, description, price, es_cortesia, category_id, product_base_type_id, preparation_time,
                         controla_stock, is_available, is_available_online, is_available_table_qr,
                         is_combo, is_resale, open_priced, allow_modifiers,
                         tax_category, tax_resolution, tax_line_key,
                         tenant_id, station_id, kitchen_name, image_url, costo_percibido
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
                     RETURNING id, created_at, updated_at
                 """
                 product_result = await conn.fetchrow(
@@ -221,6 +223,7 @@ async def create_product_with_recipe(
                     product_data.name,
                     product_data.description,
                     product_data.price,
+                    product_data.es_cortesia,
                     product_data.category_id,
                     product_data.product_base_type_id,
                     product_data.preparation_time,
@@ -379,6 +382,7 @@ async def get_product_by_id(
                     p.name,
                     p.description,
                     p.price,
+                    p.es_cortesia,
                     p.category_id,
                     c.name as category_name,
                     c.color as category_color,
@@ -640,6 +644,7 @@ async def get_products_list(
                     p.name,
                     p.description,
                     p.price,
+                    p.es_cortesia,
                     p.category_id,
                     c.name as category_name,
                     c.color as category_color,
@@ -1244,6 +1249,29 @@ async def update_product_with_recipe(
                 update_fields = []
                 update_values = []
                 param_count = 1
+
+                # Server-side cortesia rule (uno0uno/warocol.com#2654): price 0
+                # requires the flag, even bypassing Pydantic (defense in depth).
+                # Clearing the flag on a zero-price row is also rejected.
+                _payload_peek = product_data.dict(exclude_unset=True)
+                _price_zero = _payload_peek.get("price") == 0
+                _flag = _payload_peek.get("es_cortesia")
+                if _price_zero and _flag is not True:
+                    _current_flag = await conn.fetchval(
+                        "SELECT es_cortesia FROM product WHERE id = $1 AND tenant_id = $2",
+                        product_id,
+                        tenant_id,
+                    )
+                    if not _current_flag:
+                        raise APIError("price 0 requires es_cortesia=true", status_code=400)
+                if _flag is False:
+                    _current_price = await conn.fetchval(
+                        "SELECT price FROM product WHERE id = $1 AND tenant_id = $2",
+                        product_id,
+                        tenant_id,
+                    )
+                    if _current_price == 0:
+                        raise APIError("cannot clear es_cortesia on a zero-price product", status_code=400)
 
                 # Fields where None is a valid "clear this value" intent (#465).
                 # Without this, the loop below silently drops attempts to remove
