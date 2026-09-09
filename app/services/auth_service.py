@@ -111,6 +111,7 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                 SELECT s.*, p.id as user_id, p.email, p.name, p.user_name,
                        p.description, p.logo_avatar, p.preferred_locale,
                        p.pos_catalog_layout_override,
+                       p.pos_tables_layout_override,
                        p.created_at as user_created_at
                 FROM sessions s
                 JOIN profile p ON s.user_id = p.id
@@ -231,6 +232,7 @@ async def get_session_data(request: Request, response: Response) -> SessionRespo
                 logo_avatar=session_result.get('logo_avatar'),
                 preferred_locale=session_result.get('preferred_locale'),
                 pos_catalog_layout_override=session_result.get('pos_catalog_layout_override'),
+                pos_tables_layout_override=session_result.get('pos_tables_layout_override'),
                 createdAt=session_result.get('user_created_at') or datetime.utcnow(),
                 role=user_role
             )
@@ -443,6 +445,7 @@ async def update_profile(
     description: Optional[str] = None,
     preferred_locale: Optional[str] = None,
     pos_catalog_layout_override: Optional[str] = None,
+    pos_tables_layout_override: Optional[str] = None,
     fields_set: Optional[Set[str]] = None,
 ) -> UpdateProfileResponse:
     """
@@ -469,6 +472,7 @@ async def update_profile(
                     'description': description,
                     'preferred_locale': preferred_locale,
                     'pos_catalog_layout_override': pos_catalog_layout_override,
+                    'pos_tables_layout_override': pos_tables_layout_override,
                 }.items()
                 if field_value is not None
             }
@@ -508,6 +512,11 @@ async def update_profile(
                 values.append(pos_catalog_layout_override)
                 param_idx += 1
 
+            if 'pos_tables_layout_override' in provided_fields:
+                updates.append(f"pos_tables_layout_override = ${param_idx}")
+                values.append(pos_tables_layout_override)
+                param_idx += 1
+
             if not updates:
                 raise AuthenticationError("No fields to update")
 
@@ -522,12 +531,16 @@ async def update_profile(
                 SET {', '.join(updates)}
                 WHERE id = ${param_idx}
                 RETURNING id, email, name, user_name, description, logo_avatar,
-                          preferred_locale, pos_catalog_layout_override, created_at
+                          preferred_locale, pos_catalog_layout_override, pos_tables_layout_override, created_at
             """
 
             try:
                 result = await conn.fetchrow(update_query, *values)
             except asyncpg.UndefinedColumnError:
+                if 'pos_tables_layout_override' in provided_fields and 'pos_catalog_layout_override' not in provided_fields:
+                    raise AuthenticationError(
+                        "POS tables layout preference is not available yet"
+                    ) from None
                 if 'pos_catalog_layout_override' not in provided_fields:
                     raise
                 raise AuthenticationError(
@@ -546,6 +559,7 @@ async def update_profile(
                 logo_avatar=result['logo_avatar'],
                 preferred_locale=result['preferred_locale'],
                 pos_catalog_layout_override=result.get('pos_catalog_layout_override'),
+                pos_tables_layout_override=result.get('pos_tables_layout_override'),
                 createdAt=result['created_at']
             )
 

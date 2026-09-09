@@ -19,6 +19,7 @@ from app.services.hospitality_tax_jurisdictions import (
 
 PreferredLocale = Literal['es', 'en', 'pt', 'fr', 'de', 'ar', 'hi', 'zh']
 PosCatalogLayoutOverride = Literal['grid', 'list']
+PosTablesLayoutOverride = Literal['grid', 'list', 'canvas']
 
 
 class User(BaseModel):
@@ -38,6 +39,7 @@ class ProfileUser(User):
     logo_avatar: Optional[str] = None
     preferred_locale: Optional[PreferredLocale] = None
     pos_catalog_layout_override: Optional[PosCatalogLayoutOverride] = None
+    pos_tables_layout_override: Optional[PosTablesLayoutOverride] = None
 
 
 class Session(BaseModel):
@@ -286,6 +288,7 @@ class UpdateProfileRequest(BaseModel):
     description: Optional[str] = Field(default=None, max_length=500)
     preferred_locale: Optional[PreferredLocale] = None
     pos_catalog_layout_override: Optional[PosCatalogLayoutOverride] = None
+    pos_tables_layout_override: Optional[PosTablesLayoutOverride] = None
 
     @field_validator('name', mode='before')
     @classmethod
@@ -316,6 +319,20 @@ class UpdateProfileRequest(BaseModel):
                 return None
             if normalized not in ('grid', 'list'):
                 raise ValueError('pos_catalog_layout_override must be one of: grid, list')
+            return normalized
+        return value
+
+    @field_validator('pos_tables_layout_override', mode='before')
+    @classmethod
+    def _normalize_pos_tables_layout_override(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if not normalized:
+                return None
+            if normalized not in ('grid', 'list', 'canvas'):
+                raise ValueError('pos_tables_layout_override must be one of: grid, list, canvas')
             return normalized
         return value
 
