@@ -26,6 +26,7 @@ from app.services.operaciones_context_service import (
     set_open_sale_enabled,
     update_minimum_consumption_config,
     update_pos_catalog_layout,
+    update_pos_tables_layout,
     update_promo_conflict_config,
     update_tables_label,
     update_tip_config,
@@ -67,6 +68,20 @@ class PosCatalogLayoutRequest(BaseModel):
         normalized = (value or "").strip().lower()
         if normalized not in ("grid", "list"):
             raise ValueError("layout must be one of: grid, list")
+        return normalized
+
+
+class PosTablesLayoutRequest(BaseModel):
+    """Payload for PATCH /operaciones/pos-tables-layout (uno0uno/warocol.com#2641)."""
+
+    layout: str
+
+    @field_validator("layout")
+    @classmethod
+    def _validate_layout(cls, value: str) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized not in ("grid", "list", "canvas"):
+            raise ValueError("layout must be one of: grid, list, canvas")
         return normalized
 
 
@@ -196,6 +211,15 @@ async def patch_pos_catalog_layout(request: Request, body: PosCatalogLayoutReque
     session = require_valid_session(request)
     return await update_pos_catalog_layout(session.tenant_id, body.layout)
 
+
+@router.patch(
+    "/pos-tables-layout",
+    dependencies=[Depends(require_module(Module.OPERACIONES))],
+)
+async def patch_pos_tables_layout(request: Request, body: PosTablesLayoutRequest):
+    """Persist tenant default POS tables view (uno0uno/warocol.com#2641)."""
+    session = require_valid_session(request)
+    return await update_pos_tables_layout(session.tenant_id, body.layout)
 
 @router.patch(
     "/toggles/pos-show-product-image",

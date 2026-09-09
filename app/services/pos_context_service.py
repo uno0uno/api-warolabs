@@ -63,6 +63,7 @@ SELECT
     tpp.promo_conflict_strategy,
     tpp.promo_type_block_map,
     tpp.pos_catalog_layout_default,
+    tpp.pos_tables_layout_default,
     tpp.pos_show_product_image,
     tpp.pos_show_search,
     tpp.deduct_inventory_on_command,
@@ -111,6 +112,7 @@ _CONTEXT_QUERY_WITHOUT_UI_LOCALE = _CONTEXT_QUERY.replace(
 _CONTEXT_QUERY_WITHOUT_POS_CATALOG = (
     _CONTEXT_QUERY
     .replace("    tpp.pos_catalog_layout_default,\n", "    NULL AS pos_catalog_layout_default,\n")
+    .replace("    tpp.pos_tables_layout_default,\n", "    NULL AS pos_tables_layout_default,\n")
     .replace("    tpp.pos_show_product_image,\n", "    NULL AS pos_show_product_image,\n")
     .replace("    tpp.pos_show_search,\n", "    NULL AS pos_show_search,\n")
     .replace("    tpp.deduct_inventory_on_command,\n", "    NULL AS deduct_inventory_on_command,\n")
@@ -119,6 +121,7 @@ _CONTEXT_QUERY_WITHOUT_POS_CATALOG = (
 _CONTEXT_QUERY_WITHOUT_UI_LOCALE_OR_POS_CATALOG = (
     _CONTEXT_QUERY_WITHOUT_UI_LOCALE
     .replace("    tpp.pos_catalog_layout_default,\n", "    NULL AS pos_catalog_layout_default,\n")
+    .replace("    tpp.pos_tables_layout_default,\n", "    NULL AS pos_tables_layout_default,\n")
     .replace("    tpp.pos_show_product_image,\n", "    NULL AS pos_show_product_image,\n")
     .replace("    tpp.pos_show_search,\n", "    NULL AS pos_show_search,\n")
     .replace("    tpp.deduct_inventory_on_command,\n", "    NULL AS deduct_inventory_on_command,\n")
@@ -429,6 +432,15 @@ async def get_restaurant_context(tenant_id: UUID) -> Optional[Dict[str, Any]]:
             if (
                 'pos_catalog_layout_default' in row.keys()
                 and row['pos_catalog_layout_default'] in ('grid', 'list')
+            )
+            else 'grid'
+        ),
+        # uno0uno/warocol.com#2641 — POS tables default view (tenant-wide)
+        'pos_tables_layout_default': (
+            row['pos_tables_layout_default']
+            if (
+                'pos_tables_layout_default' in row.keys()
+                and row['pos_tables_layout_default'] in ('grid', 'list', 'canvas')
             )
             else 'grid'
         ),
