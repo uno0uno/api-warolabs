@@ -1252,8 +1252,11 @@ async def update_product_with_recipe(
 
                 # Server-side cortesia rule (uno0uno/warocol.com#2654): price 0
                 # requires the flag, even bypassing Pydantic (defense in depth).
+                # Clearing the flag on a zero-price row is also rejected.
                 _payload_peek = product_data.dict(exclude_unset=True)
-                if _payload_peek.get("price") == 0 and _payload_peek.get("es_cortesia") is not True:
+                _price_zero = _payload_peek.get("price") == 0
+                _flag = _payload_peek.get("es_cortesia")
+                if _price_zero and _flag is not True:
                     _current_flag = await conn.fetchval(
                         "SELECT es_cortesia FROM product WHERE id = $1 AND tenant_id = $2",
                         product_id,
@@ -1261,6 +1264,14 @@ async def update_product_with_recipe(
                     )
                     if not _current_flag:
                         raise APIError("price 0 requires es_cortesia=true", status_code=400)
+                if _flag is False:
+                    _current_price = await conn.fetchval(
+                        "SELECT price FROM product WHERE id = $1 AND tenant_id = $2",
+                        product_id,
+                        tenant_id,
+                    )
+                    if _current_price == 0:
+                        raise APIError("cannot clear es_cortesia on a zero-price product", status_code=400)
 
                 # Fields where None is a valid "clear this value" intent (#465).
                 # Without this, the loop below silently drops attempts to remove
