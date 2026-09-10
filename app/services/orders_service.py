@@ -5170,6 +5170,29 @@ async def create_manual_order(
                         item.get("modifiers", []),
                     )
 
+                # Courtesy rule (uno0uno/warocol.com#2655): zero-price lines
+                # require a courtesy product, even on the manual path.
+                zero_lines = [
+                    item for item in items
+                    if float(item.get("unit_price") or 0) == 0
+                ]
+                if zero_lines:
+                    flag_rows = await conn.fetch(
+                        "SELECT id, es_cortesia FROM product WHERE tenant_id = $1 AND id = ANY($2::uuid[])",
+                        tenant_id,
+                        [UUID(str(item["product_id"])) for item in zero_lines],
+                    )
+                    flags = {str(r["id"]): bool(r["es_cortesia"]) for r in flag_rows}
+                    bad = [
+                        str(item["product_id"]) for item in zero_lines
+                        if not flags.get(str(item["product_id"]), False)
+                    ]
+                    if bad:
+                        raise APIError(
+                            "Zero unit price requires a courtesy product",
+                            status_code=400,
+                        )
+
                 # Compute total server-side — never trust client total.
                 gross_total = sum(
                     float(item["quantity"]) * (

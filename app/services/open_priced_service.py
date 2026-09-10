@@ -32,7 +32,7 @@ async def fetch_product_pricing_map(
         return {}
     rows = await conn.fetch(
         """
-        SELECT id, price, open_priced
+        SELECT id, price, open_priced, es_cortesia
         FROM product
         WHERE tenant_id = $1 AND id = ANY($2::uuid[])
         """,
@@ -43,6 +43,7 @@ async def fetch_product_pricing_map(
         str(row["id"]): {
             "price": _to_money(row["price"]),
             "open_priced": bool(row["open_priced"]),
+            "es_cortesia": bool(row["es_cortesia"]) if "es_cortesia" in row.keys() else False,
         }
         for row in rows
     }
@@ -67,6 +68,7 @@ def resolve_line_unit_price(
     row = pricing[key]
     catalog = row["price"]
     open_priced = row["open_priced"]
+    es_cortesia = bool(row.get("es_cortesia", False))
     mods = modifiers or []
 
     if open_priced:
@@ -88,6 +90,11 @@ def resolve_line_unit_price(
         pass
 
     resolved = _to_money(requested_unit_price)
+    if resolved == 0 and not es_cortesia:
+        raise ValidationError(
+            "Zero unit price requires a courtesy product",
+            details={"product_id": key},
+        )
     if not _prices_match(catalog, resolved):
         raise ValidationError(
             "Unit price does not match catalog price for this product",
