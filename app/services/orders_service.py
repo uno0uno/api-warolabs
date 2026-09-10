@@ -1721,6 +1721,14 @@ def _looks_like_wompi_slug_or_name(value: Optional[str]) -> bool:
     return str(value or "").strip().lower() == _WOMPI_METHOD_NAME
 
 
+def _reject_wompi_zero_total() -> None:
+    """Wompi cannot collect zero totals (uno0uno/warocol.com#2658)."""
+    raise APIError(
+        "Wompi no admite cobros con total 0",
+        status_code=400,
+    )
+
+
 async def _payment_tender_is_wompi(
     conn,
     tenant_id: UUID,
@@ -1867,6 +1875,8 @@ async def update_order_status(
                     ):
                         is_wompi_collection = True
                         break
+            if is_wompi_collection and amount_due == 0:
+                _reject_wompi_zero_total()
             if status == "completed":
                 (
                     discount_type_value,
@@ -5234,6 +5244,9 @@ async def create_manual_order(
 
                 if wompi_collection and split_payments:
                     raise APIError("Wompi no admite cobro dividido", status_code=400)
+
+                if wompi_collection and total_amount == 0:
+                    _reject_wompi_zero_total()
 
                 payment_status = (
                     None
