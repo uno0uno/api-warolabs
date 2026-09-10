@@ -2001,6 +2001,9 @@ async def update_order_status(
             if is_wompi_collection and using_split:
                 raise APIError("Wompi no admite cobro dividido", status_code=400)
 
+            if is_wompi_collection and amount_due == 0:
+                _reject_wompi_zero_total()
+
             if payment_method:
                 group_row = await conn.fetchrow(
                     """
