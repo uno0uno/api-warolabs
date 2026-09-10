@@ -1230,8 +1230,11 @@ def validate_product_row(
 
     finish_resale = _truthy(row.get("finish_resale"))
     price = _parse_decimal(row.get("price"))
-    if price is None or price <= 0:
+    es_cortesia = _truthy(row.get("es_cortesia"))
+    if price is None or price < 0:
         return None, {"row": row_num, "field": "price", "error": "price must be a positive number"}
+    if price == 0 and not es_cortesia:
+        return None, {"row": row_num, "field": "price", "error": "price 0 requires es_cortesia=true"}
 
     menu_category = (row.get("menu_category") or "").strip()
     if not menu_category:
@@ -1256,6 +1259,7 @@ def validate_product_row(
         "row": row_num,
         "name": name,
         "price": price,
+        "es_cortesia": es_cortesia,
         "menu_category": menu_category,
         "is_available": is_available,
         "recipe_base_names": recipe_base_names,
@@ -1324,29 +1328,31 @@ async def create_menu_product_on_conn(
     category_id: UUID,
     is_available: bool = True,
     recipe_base_ids: Optional[List[UUID]] = None,
+    es_cortesia: bool = False,
 ) -> UUID:
     """Menu product create subset for CSV (no auto_resale; use create_resale_product_for_ingredient)."""
     await check_plan_quota_growth(conn, tenant_id, "menu_products")
     product_result = await conn.fetchrow(
         """
         INSERT INTO product (
-            name, description, price, category_id, product_base_type_id, preparation_time,
+            name, description, price, es_cortesia, category_id, product_base_type_id, preparation_time,
             controla_stock, is_available, is_available_online, is_available_table_qr,
             is_combo, is_resale, open_priced, allow_modifiers,
             tax_category, tax_resolution, tax_line_key,
             tenant_id, station_id, kitchen_name, image_url, costo_percibido
         )
         VALUES (
-            $1, NULL, $2, $3, NULL, NULL,
-            true, $4, true, false,
+            $1, NULL, $2, $3, $4, NULL, NULL,
+            true, $5, true, false,
             false, false, false, true,
             'standard', 'inherit', NULL,
-            $5, NULL, NULL, NULL, NULL
+            $6, NULL, NULL, NULL, NULL
         )
         RETURNING id
         """,
         name,
         price,
+        es_cortesia,
         category_id,
         is_available,
         tenant_id,
@@ -1668,6 +1674,7 @@ async def commit_products_import(request: Request, job_id: UUID) -> Dict[str, An
                                 category_id=cat_id,
                                 is_available=bool(item.get("is_available", True)),
                                 recipe_base_ids=rb_ids,
+                                es_cortesia=bool(item.get("es_cortesia", False)),
                             )
                             committed.append(
                                 {
