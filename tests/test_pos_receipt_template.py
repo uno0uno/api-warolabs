@@ -1,4 +1,4 @@
-"""Tests for POS receipt template tip label (warocol.com#977)."""
+"""Tests for POS receipt template tip label (warocol.com#977) + courtesy lines (#2669)."""
 from datetime import datetime, timezone
 
 import pytest
@@ -345,3 +345,18 @@ def test_pos_receipt_reports_pending_fiscal_artifacts(
     )
 
     assert expected in text
+
+
+def test_pos_receipt_marks_courtesy_line():
+    text = get_pos_receipt_text(
+        order_number=60,
+        total_amount=25000,
+        payment_method="cash",
+        items=[
+            {"quantity": 1, "subtotal": 25000, "product": {"name": "Almuerzo"}},
+            {"quantity": 2, "subtotal": 0, "product": {"name": "Cafe"}, "is_courtesy": True},
+        ],
+        order_date=datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc),
+    )
+    assert "2x Cafe (Cortesía)" in text
+    assert "1x Almuerzo (Cortesía)" not in text

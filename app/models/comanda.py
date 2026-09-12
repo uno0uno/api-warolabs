@@ -21,6 +21,7 @@ class ComandaItem(BaseModel):
     notes: Optional[str] = None
     modifiers_snapshot: Optional[List[Dict[str, Any]]] = None
     is_promo_free: Optional[bool] = False
+    is_courtesy: Optional[bool] = False  # Cortesias #2669: cocina produce, caja no cobra
     status: str
     ready_at: Optional[datetime] = None
     created_at: datetime

@@ -148,7 +148,11 @@ def get_pos_receipt_text(
         qty = item.get("quantity", 1)
         name_item = item.get("product", {}).get("name", _("Product"))
         item_subtotal = float(item.get("subtotal", 0))
-        line = f"  {qty}x {name_item}  {money(item_subtotal)}"
+        # Cortesias (#2669): rotulo visible en email (HTML es <pre> del texto).
+        if item.get("is_courtesy"):
+            line = f"  {qty}x {name_item} (Cortesía)  {money(item_subtotal)}"
+        else:
+            line = f"  {qty}x {name_item}  {money(item_subtotal)}"
         if item.get("modifiers"):
             mod_names = ", ".join(
                 m.get("name", "") for m in item["modifiers"] if m.get("name")
