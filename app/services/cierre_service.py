@@ -790,44 +790,65 @@ async def _post_order_cogs_gl_entry(
     - Missing COGS or INVENTORY role fails explicitly before journal insertion
     - The caller decides whether non-configuration failures block completion
     """
-    # ── Idempotency guard ──────────────────────────────────────────────────
-    existing = await conn.fetchval(
-        """SELECT id FROM tenant_journal_entries
-            WHERE source_module IN ('orden_cogs', 'orden_cortesia')
-              AND source_id = $1 AND tenant_id = $2
-              AND status = 'posted'""",
-        order_id, tenant_id,
-    )
-    if existing:
-        logger.info(f"[GL] COGS Order {order_id}: entry already exists — skip (idempotent)")
-        return
-
-    # ── Sum ingredient cost from order_item_ingredients ───────────────────
-    total_cogs = await conn.fetchval(
+    # ── Split courtesy vs non-courtesy cost (#2687: gasto separado) ─────
+    courtesy_cost = await conn.fetchval(
         """SELECT COALESCE(SUM(oii.total_cost), 0)
            FROM order_item_ingredients oii
            JOIN order_items oi ON oi.id = oii.order_item_id
-           WHERE oi.order_id = $1
-             AND oii.total_cost IS NOT NULL
-             AND oii.total_cost > 0""",
+           LEFT JOIN product p ON p.id = oi.product_id
+           LEFT JOIN product_variants pv ON pv.id = oi.variant_id
+           LEFT JOIN product pv_p ON pv_p.id = pv.product_id
+           WHERE oi.order_id = $1 AND oii.total_cost > 0
+             AND COALESCE(p.es_cortesia, pv_p.es_cortesia, FALSE) = TRUE""",
         order_id,
     )
-    if not total_cogs or float(total_cogs) <= 0:
+    non_courtesy_cost = await conn.fetchval(
+        """SELECT COALESCE(SUM(oii.total_cost), 0)
+           FROM order_item_ingredients oii
+           JOIN order_items oi ON oi.id = oii.order_item_id
+           LEFT JOIN product p ON p.id = oi.product_id
+           LEFT JOIN product_variants pv ON pv.id = oi.variant_id
+           LEFT JOIN product pv_p ON pv_p.id = pv.product_id
+           WHERE oi.order_id = $1 AND oii.total_cost > 0
+             AND COALESCE(p.es_cortesia, pv_p.es_cortesia, FALSE) = FALSE""",
+        order_id,
+    )
+    courtesy_cost = float(courtesy_cost or 0)
+    non_courtesy_cost = float(non_courtesy_cost or 0)
+    if courtesy_cost <= 0 and non_courtesy_cost <= 0:
         logger.info(f"[GL] Order {order_id}: no ingredient cost data — skip COGS entry")
         return
-
-    # 100% courtesy → dedicated source module for P&G breakout (#2671).
-    non_courtesy = await conn.fetchval(
-        """SELECT COUNT(*)
-            FROM order_items oi
-            LEFT JOIN product p ON p.id = oi.product_id
-            LEFT JOIN product_variants pv ON pv.id = oi.variant_id
-            LEFT JOIN product pv_p ON pv_p.id = pv.product_id
-            WHERE oi.order_id = $1
-              AND COALESCE(p.es_cortesia, pv_p.es_cortesia, FALSE) = FALSE""",
-        order_id,
-    )
-    source_module = 'orden_cortesia' if int(non_courtesy or 0) == 0 else 'orden_cogs'
+    # helper idempotency per module
+    async def _exists(module: str) -> bool:
+        return bool(await conn.fetchval(
+            "SELECT 1 FROM tenant_journal_entries WHERE source_module=$1 AND source_id=$2 AND tenant_id=$3 AND status='posted'",
+            module, order_id, tenant_id,
+        ))
+    # ── If mixed, post two entries; if pure, one ───────────────────────
+    # We reuse total_cogs var for backward compat in single-post path; keep for logs
+    total_cogs = courtesy_cost + non_courtesy_cost
+    # Pure courtesy
+    if non_courtesy_cost == 0 and courtesy_cost > 0:
+        if await _exists('orden_cortesia'):
+            logger.info(f"[GL] COGS Order {order_id}: orden_cortesia exists — skip")
+            return
+        source_module = 'orden_cortesia'
+        # fall through to single insert below with courtesy_cost
+        total_cogs = courtesy_cost
+    elif courtesy_cost > 0 and non_courtesy_cost > 0:
+        # Mixed → post both separately, then return
+        for module, amount in [('orden_cogs', non_courtesy_cost), ('orden_cortesia', courtesy_cost)]:
+            if await _exists(module):
+                logger.info(f"[GL] COGS Order {order_id}: {module} exists — skip")
+                continue
+            await _post_single_entry(conn, tenant_id, order_date, order_number, order_id, module, amount)
+        return
+    else:
+        if await _exists('orden_cogs'):
+            logger.info(f"[GL] COGS Order {order_id}: entry already exists — skip (idempotent)")
+            return
+        source_module = 'orden_cogs'
+        total_cogs = non_courtesy_cost
 
     cogs_acct = await resolve_account(
         conn, tenant_id, AccountRole.COGS, source="order_cogs"
@@ -835,6 +856,21 @@ async def _post_order_cogs_gl_entry(
     inv_acct = await resolve_account(
         conn, tenant_id, AccountRole.INVENTORY, source="order_cogs"
     )
+
+    async def _post_single_entry(conn, tenant_id, order_date, order_number, order_id, module: str, amount: float):
+        desc = f"CMV #{order_number}" if order_number else f"CMV {order_date.isoformat()} — orden {order_id}"
+        if module == 'orden_cortesia':
+            desc += " — cortesía"
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """INSERT INTO tenant_journal_entries (tenant_id, entry_date, period_year, period_month, description, source_module, source_id, status, total_debit, total_credit, posted_at)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,'posted',$8,$9,NOW()) RETURNING id""",
+                tenant_id, order_date, order_date.year, order_date.month, desc, module, order_id, amount, amount,
+            )
+            eid = row["id"]
+            await conn.execute("INSERT INTO tenant_journal_lines (journal_entry_id, account_id, debit, credit, description, line_order) VALUES ($1,$2,$3,0,$4,0)", eid, cogs_acct.id, amount, desc)
+            await conn.execute("INSERT INTO tenant_journal_lines (journal_entry_id, account_id, debit, credit, description, line_order) VALUES ($1,$2,0,$3,$4,1)", eid, inv_acct.id, amount, desc)
+            logger.info(f"[GL] ✅ Posted COGS entry {eid} for order {order_id} (cogs={amount}, module={module})")
 
     # ── Insert entry + 2 lines ─────────────────────────────────────────────
     amount = float(total_cogs)
