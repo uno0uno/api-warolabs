@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response, Query, Form, File, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, Request, Response, Query, Form, File, UploadFile
 from uuid import UUID
 from typing import Optional, List
 from app.core.permissions import Module, require_module
@@ -327,15 +327,20 @@ async def delete_direct_purchase_endpoint(
     purchase_id: UUID,
     request: Request,
     response: Response,
+    payload: dict = Body(default={}),
 ):
     """
     Delete a direct purchase: reverse inventory (with movement trail), void GL,
-    then remove the purchase row.
+    then remove the purchase row. Requires `reason` in body (Bitácora audit).
     """
+    reason = (payload or {}).get("reason", "").strip() if isinstance(payload, dict) else ""
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason is required")
     return await delete_direct_purchase(
         request=request,
         response=response,
         purchase_id=purchase_id,
+        reason=reason,
     )
 
 

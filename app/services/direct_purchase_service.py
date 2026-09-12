@@ -1822,11 +1822,12 @@ async def delete_direct_purchase(
     request: Request,
     response: Response,
     purchase_id: UUID,
+    reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Delete a direct purchase: reverse inventory with movement trail (stock may
     go negative), void inventario + supplier-payment GL, then hard-delete the
-    purchase and child rows.
+    purchase and child rows. Requires `reason` (Bitácora audit).
     """
     try:
         session_context = require_valid_session(request)
@@ -1949,7 +1950,7 @@ async def delete_direct_purchase(
                     conn,
                     tenant_id,
                     purchase_id,
-                    reason="Compra directa eliminada",
+                    reason=reason or "Compra directa eliminada",
                 )
 
                 await conn.execute(
@@ -1989,6 +1990,7 @@ async def delete_direct_purchase(
                     entity_type="direct_purchase",
                     entity_id=purchase_id,
                     label=purchase_number,
+                    reason=reason,
                 )
 
                 return {
