@@ -2114,6 +2114,7 @@ async def complete_pos_order(
     waros_to_redeem: Optional[int] = None,
     waro_reward_id: Optional[UUID] = None,
     wompi_collection: bool = False,
+    courtesy_reason: Optional[str] = None,
 ) -> dict:
     """
     Complete a POS order.
@@ -2262,6 +2263,27 @@ async def complete_pos_order(
                 if not items:
                     raise APIError("Cannot complete order with empty cart", status_code=400)
 
+                # Cortesias (#2671): auditoria quien+motivo en extra_attributes.
+                import json as _json
+                from datetime import datetime as _datetime, timezone as _timezone
+                _courtesy_pids = [item['product']['id'] for item in items]
+                _courtesy_rows = await conn.fetch(
+                    "SELECT id FROM product WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND COALESCE(es_cortesia, FALSE) = TRUE",
+                    tenant_id,
+                    [UUID(str(pid)) for pid in _courtesy_pids],
+                )
+                _has_courtesy = len(_courtesy_rows) > 0
+                _extra_attributes: Optional[dict] = None
+                if _has_courtesy:
+                    _extra_attributes = {
+                        "courtesy": {
+                            "by": str(user_id) if user_id else None,
+                            "reason": (courtesy_reason or "").strip()[:280] or None,
+                            "at": _datetime.now(_timezone.utc).isoformat(),
+                        }
+                    }
+                _extra_attributes_json = _json.dumps(_extra_attributes) if _extra_attributes else None
+
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
                 _tip_taxable = bool(tip_taxable) if tip_amount > 0 else False
                 _tip_tax_amount = compute_tip_tax_amount(
@@ -2369,9 +2391,10 @@ async def complete_pos_order(
                         cash_received,
                         served_by_member_id,
                         tip_amount, tip_source,
-                        tip_taxable, tip_tax_amount
+                        tip_taxable, tip_tax_amount,
+                        extra_attributes
                     )
-                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+                    VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
                     RETURNING id, order_number, created_at
                 """
                 order_row = await conn.fetchrow(
@@ -2399,6 +2422,7 @@ async def complete_pos_order(
                     tip_source,
                     _tip_taxable,
                     float(_tip_tax_amount),
+                    _extra_attributes_json,
                 )
                 order_id = order_row['id']
                 order_number = order_row['order_number']

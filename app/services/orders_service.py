@@ -5109,6 +5109,23 @@ async def get_sales_flow(
         raise APIError(f"Error getting sales flow: {str(e)}", status_code=500)
 
 
+def _manual_extra_attributes(
+    courtesy_flags: dict,
+    user_id: Any,
+    courtesy_reason: Optional[str],
+    order_datetime: Any,
+) -> dict:
+    """Audit for courtesy lines: who + optional reason + timestamp (#2671)."""
+    extra: dict = {"source": "manual"}
+    if courtesy_flags and any(courtesy_flags.values()):
+        extra["courtesy"] = {
+            "by": str(user_id) if user_id else None,
+            "reason": (courtesy_reason or "").strip()[:280] or None,
+            "at": order_datetime.isoformat() if hasattr(order_datetime, "isoformat") else None,
+        }
+    return extra
+
+
 async def create_manual_order(
     request: Request,
     order_date: str,
@@ -5120,6 +5137,7 @@ async def create_manual_order(
     discount_value: Optional[float] = None,
     payments: Optional[List[dict]] = None,
     wompi_collection: bool = False,
+    courtesy_reason: Optional[str] = None,
 ) -> dict:
     """
     Create an order manually with a custom date, bypassing the POS cart.
@@ -5330,7 +5348,9 @@ async def create_manual_order(
                     normalized_discount_type,
                     normalized_discount_value,
                     discount_amount or None,
-                    json.dumps({"source": "manual"}),
+                    json.dumps(_manual_extra_attributes(
+                        courtesy_flags, user_id, courtesy_reason, order_datetime
+                    )),
                     order_status,
                 )
 

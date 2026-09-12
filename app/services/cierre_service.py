@@ -785,15 +785,17 @@ async def _post_order_cogs_gl_entry(
 
     Rules:
     - Only posts if total ingredient cost > 0 (skip if no purchase history)
-    - Idempotent: skips if source_module='orden_cogs' entry already exists
+    - Idempotent: skips if source_module='orden_cogs'/'orden_cortesia' entry exists
+    - 100%-courtesy orders post as source_module='orden_cortesia' (#2671)
     - Missing COGS or INVENTORY role fails explicitly before journal insertion
     - The caller decides whether non-configuration failures block completion
     """
     # ── Idempotency guard ──────────────────────────────────────────────────
     existing = await conn.fetchval(
         """SELECT id FROM tenant_journal_entries
-           WHERE source_module = 'orden_cogs' AND source_id = $1 AND tenant_id = $2
-             AND status = 'posted'""",
+            WHERE source_module IN ('orden_cogs', 'orden_cortesia')
+              AND source_id = $1 AND tenant_id = $2
+              AND status = 'posted'""",
         order_id, tenant_id,
     )
     if existing:
@@ -814,6 +816,17 @@ async def _post_order_cogs_gl_entry(
         logger.info(f"[GL] Order {order_id}: no ingredient cost data — skip COGS entry")
         return
 
+    # 100% courtesy → dedicated source module for P&G breakout (#2671).
+    non_courtesy = await conn.fetchval(
+        """SELECT COUNT(*)
+            FROM order_items oi
+            JOIN product p ON p.id = oi.product_id
+            WHERE oi.order_id = $1
+              AND COALESCE(p.es_cortesia, FALSE) = FALSE""",
+        order_id,
+    )
+    source_module = 'orden_cortesia' if int(non_courtesy or 0) == 0 else 'orden_cogs'
+
     cogs_acct = await resolve_account(
         conn, tenant_id, AccountRole.COGS, source="order_cogs"
     )
@@ -824,6 +837,8 @@ async def _post_order_cogs_gl_entry(
     # ── Insert entry + 2 lines ─────────────────────────────────────────────
     amount = float(total_cogs)
     description = f"CMV #{order_number}" if order_number else f"CMV {order_date.isoformat()} — orden {order_id}"
+    if source_module == 'orden_cortesia':
+        description += " — cortesía"
 
     async with conn.transaction():
         entry_row = await conn.fetchrow(
@@ -831,10 +846,10 @@ async def _post_order_cogs_gl_entry(
                    (tenant_id, entry_date, period_year, period_month,
                     description, source_module, source_id, status,
                     total_debit, total_credit, posted_at)
-               VALUES ($1, $2, $3, $4, $5, 'orden_cogs', $6, 'posted', $7, $8, NOW())
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'posted', $8, $9, NOW())
                RETURNING id""",
             tenant_id, order_date, order_date.year, order_date.month,
-            description, order_id, amount, amount,
+            description, source_module, order_id, amount, amount,
         )
         entry_id = entry_row["id"]
 
@@ -855,7 +870,7 @@ async def _post_order_cogs_gl_entry(
         )
 
     logger.info(
-        f"[GL] ✅ Posted COGS entry {entry_id} for order {order_id} (cogs={amount})"
+        f"[GL] ✅ Posted COGS entry {entry_id} for order {order_id} (cogs={amount}, module={source_module})"
     )
 
 
