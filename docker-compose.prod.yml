@@ -4,9 +4,19 @@
 version: '3.8'
 
 services:
-  web:
+  web-1:
     environment:
       - DEBUG=false
       - ENVIRONMENT=production
     # No volumes - code is baked into the image
+    restart: unless-stopped
+  web-2:
+    environment:
+      - DEBUG=false
+      - ENVIRONMENT=production
+    restart: unless-stopped
+  web-3:
+    environment:
+      - DEBUG=false
+      - ENVIRONMENT=production
     restart: unless-stopped
