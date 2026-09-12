@@ -55,10 +55,11 @@ async def test_courtesy_rejects_priced_modifier():
         [{"id": mid, "modifier_group_id": gid, "name": "Queso", "price": Decimal("500"),
           "max_limit": 3, "included_quantity": 0, "is_available": True}],
     ])
-    with pytest.raises(APIError):
+    with pytest.raises(APIError) as exc:
         await resolve_modifier_selections(
             conn, pid, [{"id": str(mid), "quantity": 1}], is_courtesy=True
         )
+    assert exc.value.status_code == 400
 
 
 @pytest.mark.asyncio
@@ -93,6 +94,63 @@ async def test_non_courtesy_keeps_priced_modifier():
         conn, pid, [{"id": str(mid), "quantity": 1}], is_courtesy=False
     )
     assert len(resolved) == 1
+
+
+@pytest.mark.asyncio
+async def test_online_cart_rejects_courtesy():
+    from contextlib import asynccontextmanager
+
+    from app.core.exceptions import APIError
+    from app.services import online_cart_service
+
+    pid = uuid4()
+    conn = MagicMock()
+
+    async def _fetch(query, *args):
+        if "tenant_id != $2" in query:
+            return []
+        return [{"id": pid, "price": Decimal("0.00"), "es_cortesia": True}]
+
+    conn.fetch = _fetch
+    conn.fetchrow = AsyncMock(return_value={"id": uuid4()})
+
+    @asynccontextmanager
+    async def _tx():
+        yield None
+
+    conn.transaction.side_effect = lambda: _tx()
+
+    @asynccontextmanager
+    async def _ctx():
+        yield conn
+
+    with patch.object(online_cart_service, "get_db_connection", side_effect=lambda: _ctx()):
+        with pytest.raises(APIError) as exc:
+            await online_cart_service.create_cart_with_batch_items(
+                uuid4(), [{"product_id": str(pid), "quantity": 1}]
+            )
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_table_qr_snapshot_rejects_courtesy():
+    from fastapi import HTTPException
+
+    from app.services import public_table_qr_service
+
+    pid = uuid4()
+    conn = MagicMock()
+    conn.fetch = AsyncMock(
+        return_value=[{"id": pid, "name": "Cafe", "price": Decimal("0.00"), "es_cortesia": True}]
+    )
+    with patch.object(
+        public_table_qr_service, "validate_products_belong_to_tenant", new=AsyncMock()
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await public_table_qr_service._build_item_snapshots(
+                conn, uuid4(), [{"product_id": str(pid), "quantity": 1}]
+            )
+    assert exc.value.status_code == 400
 
 
 def test_validate_items_accepts_courtesy_lines():

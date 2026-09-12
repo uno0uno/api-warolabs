@@ -236,6 +236,7 @@ async def create_cart_with_batch_items(
 
                 # Add all items
                 cart_total = Decimal('0')
+                courtesy_map = {str(row['id']): bool(row['es_cortesia']) for row in product_rows}
                 for item_data in items:
                     product_id = item_data['product_id']
                     quantity = item_data['quantity']
@@ -244,7 +245,8 @@ async def create_cart_with_batch_items(
                     notes = item_data.get('notes')
 
                     resolved_modifiers = await resolve_modifier_selections(
-                        conn, UUID(str(product_id)), modifiers
+                        conn, UUID(str(product_id)), modifiers,
+                        is_courtesy=courtesy_map.get(str(product_id), False),
                     )
 
                     # Calculate subtotal from DB prices
