@@ -252,6 +252,7 @@ class PLRevenue(BaseModel):
 
 class PLCogs(BaseModel):
     food_cost: float = Field(alias='foodCost')
+    courtesy_cost: float = Field(default=0.0, alias='courtesyCost')
     total: float
 
     class Config:

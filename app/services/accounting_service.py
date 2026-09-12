@@ -1305,6 +1305,22 @@ async def _compute_pl_for_period(
 
     food_cost = cogs_from_expenses + cogs_from_purchases
 
+    # Cortesias (#2675): costo informativo desde asientos orden_cortesia.
+    # No toca food_cost ni netos — evita doble conteo.
+    courtesy_row = await conn.fetchrow(
+        """
+        SELECT COALESCE(SUM(total_debit), 0) AS total
+        FROM tenant_journal_entries
+        WHERE tenant_id = $1
+          AND source_module = 'orden_cortesia'
+          AND status = 'posted'
+          AND entry_date >= $2::date
+          AND entry_date <  $3::date
+        """,
+        tenant_id, month_start, month_end,
+    )
+    courtesy_cost = Decimal(str(courtesy_row['total']))
+
     # --- Operating expenses by category ---
     opex_rows = await conn.fetch(
         """
@@ -1392,6 +1408,7 @@ async def _compute_pl_for_period(
         }),
         'cogs': PLCogs(**{
             'foodCost': float(food_cost),
+            'courtesyCost': float(courtesy_cost),
             'total':    float(food_cost),
         }),
         'grossProfit':      float(gross_profit),
