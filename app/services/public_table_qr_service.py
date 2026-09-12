@@ -410,7 +410,7 @@ async def _build_item_snapshots(
 
     product_rows = await conn.fetch(
         """
-        SELECT id, name, price
+        SELECT id, name, price, es_cortesia
         FROM product
         WHERE id = ANY($1::uuid[])
           AND tenant_id = $2
@@ -424,6 +424,12 @@ async def _build_item_snapshots(
         raise HTTPException(
             status_code=409,
             detail="Uno o más productos ya no están disponibles para pedido por QR.",
+        )
+    # Cortesias (#2668): solo POS/manual — defensa aunque B1 las oculte del menu QR.
+    if any(row["es_cortesia"] for row in product_rows):
+        raise HTTPException(
+            status_code=400,
+            detail="Las cortesías solo están disponibles en POS/venta manual.",
         )
 
     # warocol.com#2576 — reject stale carts when hide-without-stock is on

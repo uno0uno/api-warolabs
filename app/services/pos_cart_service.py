@@ -532,7 +532,8 @@ async def create_cart_with_batch_items(
                     modifiers = item.get('modifiers', [])
                     notes = item.get('notes')
                     modifiers = await resolve_modifier_selections(
-                        conn, UUID(str(product_id)), modifiers
+                        conn, UUID(str(product_id)), modifiers,
+                        is_courtesy=bool(pricing_map.get(str(product_id), {}).get("es_cortesia", False)),
                     )
 
                     # Calculate subtotal
@@ -827,7 +828,10 @@ async def add_item_to_cart(
                         pricing_map, product_id, unit_price, modifiers
                     )
                 )
-                modifiers = await resolve_modifier_selections(conn, product_id, modifiers)
+                modifiers = await resolve_modifier_selections(
+                    conn, product_id, modifiers,
+                    is_courtesy=bool(pricing_map.get(str(product_id), {}).get("es_cortesia", False)),
+                )
 
                 # Calculate subtotal
                 modifiers_total = sum(_modifier_snapshot_total(mod) for mod in modifiers)
@@ -952,7 +956,8 @@ async def update_cart_item(
                     )
                 )
                 modifiers = await resolve_modifier_selections(
-                    conn, product_row["product_id"], modifiers
+                    conn, product_row["product_id"], modifiers,
+                    is_courtesy=bool(pricing_map.get(str(product_row["product_id"]), {}).get("es_cortesia", False)),
                 )
 
                 # Calculate new subtotal
