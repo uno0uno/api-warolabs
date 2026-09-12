@@ -89,3 +89,5 @@ async def test_metrics_avg_excludes_zero_orders_and_reports_courtesy():
     assert result["data"]["courtesy_units"] == 4
     assert result["data"]["courtesy_orders"] == 2
     assert any("total_amount > 0" in q for q in queries)
+    # Rama sin categoria tambien trae columnas cortesia (vista por defecto).
+    assert any("courtesy_units" in q and "es_cortesia" in q for q in queries)
