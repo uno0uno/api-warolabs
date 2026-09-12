@@ -264,6 +264,7 @@ class CreateManualOrderRequest(BaseModel):
     payments: Optional[List[ManualOrderPayment]] = None
     items: List[ManualOrderItem] = Field(min_length=1)
     wompi_collection: bool = False
+    courtesy_reason: Optional[str] = Field(None, max_length=280, description="Motivo de cortesia (#2671)")
 
 
 @router.post("/manual", dependencies=[Depends(require_module(Module.VENTAS))])
@@ -286,6 +287,7 @@ async def create_manual_order(
         discount_value=data.discount_value,
         payments=[payment.model_dump() for payment in data.payments] if data.payments else None,
         wompi_collection=data.wompi_collection,
+        courtesy_reason=data.courtesy_reason,
     )
 
 

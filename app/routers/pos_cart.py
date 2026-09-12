@@ -251,6 +251,7 @@ class CompleteOrderRequest(BaseModel):
     waros_to_redeem: Optional[int] = Field(None, ge=0, description="B1 WaRos points to redeem for COP discount (api#370)")
     waro_reward_id: Optional[UUID] = Field(None, description="B2 catalog reward UUID (api#370)")
     wompi_collection: bool = Field(False, description="Leave the order unpaid until restaurant Wompi APPROVED (#864)")
+    courtesy_reason: Optional[str] = Field(None, max_length=280, description="Motivo de cortesia (#2671)")
 
 
 @router.post("/{cart_id}/complete", dependencies=[Depends(require_module(Module.POS))])
@@ -293,6 +294,7 @@ async def complete_order(
         waros_to_redeem=order_data.waros_to_redeem,
         waro_reward_id=order_data.waro_reward_id,
         wompi_collection=order_data.wompi_collection,
+        courtesy_reason=order_data.courtesy_reason,
     )
 
 
