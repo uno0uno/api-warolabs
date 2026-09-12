@@ -4,7 +4,19 @@
 version: '3.8'
 
 services:
-  web:
+  web-1:
+    volumes:
+      - ./app:/code/app  # Hot reload for development
+    environment:
+      - DEBUG=true
+      - ENVIRONMENT=development
+  web-2:
+    volumes:
+      - ./app:/code/app  # Hot reload for development
+    environment:
+      - DEBUG=true
+      - ENVIRONMENT=development
+  web-3:
     volumes:
       - ./app:/code/app  # Hot reload for development
     environment:
