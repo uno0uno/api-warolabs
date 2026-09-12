@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 FALLBACK_STATION_NAME = "Sin cocina asignada"
 
 
-def _parse_item_row(ir: Any, *, is_promo_free: bool = False) -> Dict[str, Any]:
+def _parse_item_row(ir: Any, *, is_promo_free: bool = False, is_courtesy: bool = False) -> Dict[str, Any]:
     """Convert an asyncpg comanda_items row to a serializable dict.
     asyncpg returns JSONB columns as raw strings — parse modifiers_snapshot
     so the frontend receives a proper array, not a JSON-encoded string.
@@ -41,6 +41,8 @@ def _parse_item_row(ir: Any, *, is_promo_free: bool = False) -> Dict[str, Any]:
         except (ValueError, TypeError):
             d['modifiers_snapshot'] = None
     d['is_promo_free'] = is_promo_free
+    # Cortesias (#2669): desde JOIN (product_es_cortesia) o flag de creacion.
+    d['is_courtesy'] = is_courtesy or bool(d.pop('product_es_cortesia', False))
     return d
 
 
@@ -152,6 +154,8 @@ async def _build_comanda_print_items_for_order_item(
             "ready_at": None,
             "created_at": None,
             "is_promo_free": kitchen_line["is_promo_free"],
+            # Cortesias (#2669): cocina produce, caja no cobra.
+            "is_courtesy": bool(item.get("product_es_cortesia", False)),
         })
     return rows
 
@@ -167,7 +171,8 @@ _UNFIRED_ORDER_ITEMS_SELECT = """
         tp.promo_type,
         tp.name AS promotion_name,
         tp.value_json AS promotion_value_json,
-        COALESCE(p.kitchen_name, p.name) AS kitchen_name
+        COALESCE(p.kitchen_name, p.name) AS kitchen_name,
+        COALESCE(p.es_cortesia, FALSE) AS product_es_cortesia
     FROM order_items oi
     JOIN product p ON oi.product_id = p.id
     LEFT JOIN tenant_promotions tp ON tp.id = oi.applied_promotion_id
@@ -446,7 +451,11 @@ async def _fire_with_conn(
                     printable_item['notes'],
                 )
                 inserted_items.append(
-                    _parse_item_row(ci_row, is_promo_free=printable_item['is_promo_free'])
+                    _parse_item_row(
+                        ci_row,
+                        is_promo_free=printable_item['is_promo_free'],
+                        is_courtesy=bool(printable_item.get('is_courtesy', False)),
+                    )
                 )
 
         # 3d. Mark fired items as 'sent'
@@ -708,11 +717,14 @@ async def get_comandas_for_kds(
 
                 # Fetch items for this comanda
                 item_rows = await conn.fetch("""
-                    SELECT id, order_item_id, kitchen_name, quantity, notes,
-                           modifiers_snapshot, status, ready_at, created_at
-                    FROM comanda_items
-                    WHERE comanda_id = $1
-                    ORDER BY created_at ASC
+                    SELECT ci.id, ci.order_item_id, ci.kitchen_name, ci.quantity, ci.notes,
+                           ci.modifiers_snapshot, ci.status, ci.ready_at, ci.created_at,
+                           COALESCE(p.es_cortesia, FALSE) AS product_es_cortesia
+                    FROM comanda_items ci
+                    LEFT JOIN order_items oi ON oi.id = ci.order_item_id
+                    LEFT JOIN product p ON p.id = oi.product_id
+                    WHERE ci.comanda_id = $1
+                    ORDER BY ci.created_at ASC
                 """, row['id'])
 
                 c_data['items'] = [_parse_item_row(ir) for ir in item_rows]
@@ -781,11 +793,14 @@ async def get_comanda_detail(
 
             # Fetch nested items
             item_rows = await conn.fetch("""
-                SELECT id, order_item_id, kitchen_name, quantity, notes,
-                       modifiers_snapshot, status, ready_at, created_at
-                FROM comanda_items
-                WHERE comanda_id = $1
-                ORDER BY created_at ASC
+                SELECT ci.id, ci.order_item_id, ci.kitchen_name, ci.quantity, ci.notes,
+                       ci.modifiers_snapshot, ci.status, ci.ready_at, ci.created_at,
+                       COALESCE(p.es_cortesia, FALSE) AS product_es_cortesia
+                FROM comanda_items ci
+                LEFT JOIN order_items oi ON oi.id = ci.order_item_id
+                LEFT JOIN product p ON p.id = oi.product_id
+                WHERE ci.comanda_id = $1
+                ORDER BY ci.created_at ASC
             """, comanda_id)
 
             c_data['items'] = [_parse_item_row(ir) for ir in item_rows]
