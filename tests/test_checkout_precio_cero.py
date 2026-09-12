@@ -38,6 +38,63 @@ def test_resolve_normal_price_still_matches():
     assert resolve_line_unit_price(pricing, pid, "10.00") == 10
 
 
+def test_resolve_forces_zero_for_legacy_courtesy_with_price():
+    pid, pricing = _map(price="15.00", cortesia=True)
+    assert resolve_line_unit_price(pricing, pid, "0") == 0
+    assert resolve_line_unit_price(pricing, pid, "15.00") == 0
+
+
+@pytest.mark.asyncio
+async def test_courtesy_rejects_priced_modifier():
+    from app.services.modifier_option_service import resolve_modifier_selections
+
+    pid, mid, gid = uuid4(), uuid4(), uuid4()
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=[
+        [{"id": gid, "name": "Extras", "is_required": False, "min_qty": 0, "max_qty": 5}],
+        [{"id": mid, "modifier_group_id": gid, "name": "Queso", "price": Decimal("500"),
+          "max_limit": 3, "included_quantity": 0, "is_available": True}],
+    ])
+    with pytest.raises(APIError):
+        await resolve_modifier_selections(
+            conn, pid, [{"id": str(mid), "quantity": 1}], is_courtesy=True
+        )
+
+
+@pytest.mark.asyncio
+async def test_courtesy_allows_free_modifier():
+    from app.services.modifier_option_service import resolve_modifier_selections
+
+    pid, mid, gid = uuid4(), uuid4(), uuid4()
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=[
+        [{"id": gid, "name": "Extras", "is_required": False, "min_qty": 0, "max_qty": 5}],
+        [{"id": mid, "modifier_group_id": gid, "name": "Sin cebolla", "price": Decimal("0"),
+          "max_limit": 3, "included_quantity": 0, "is_available": True}],
+    ])
+    resolved = await resolve_modifier_selections(
+        conn, pid, [{"id": str(mid), "quantity": 1}], is_courtesy=True
+    )
+    assert len(resolved) == 1
+
+
+@pytest.mark.asyncio
+async def test_non_courtesy_keeps_priced_modifier():
+    from app.services.modifier_option_service import resolve_modifier_selections
+
+    pid, mid, gid = uuid4(), uuid4(), uuid4()
+    conn = MagicMock()
+    conn.fetch = AsyncMock(side_effect=[
+        [{"id": gid, "name": "Extras", "is_required": False, "min_qty": 0, "max_qty": 5}],
+        [{"id": mid, "modifier_group_id": gid, "name": "Queso", "price": Decimal("500"),
+          "max_limit": 3, "included_quantity": 0, "is_available": True}],
+    ])
+    resolved = await resolve_modifier_selections(
+        conn, pid, [{"id": str(mid), "quantity": 1}], is_courtesy=False
+    )
+    assert len(resolved) == 1
+
+
 def test_validate_items_accepts_courtesy_lines():
     from app.services.open_priced_service import validate_items_unit_prices
 

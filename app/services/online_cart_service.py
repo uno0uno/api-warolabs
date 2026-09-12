@@ -222,11 +222,17 @@ async def create_cart_with_batch_items(
 
                 # Fetch real product prices from DB (keyed by product_id)
                 product_price_query = """
-                    SELECT id, price FROM product
+                    SELECT id, price, es_cortesia FROM product
                     WHERE id = ANY($1) AND tenant_id = $2
                 """
                 product_rows = await conn.fetch(product_price_query, product_ids, tenant_id)
                 product_prices = {str(row['id']): Decimal(str(row['price'])) for row in product_rows}
+                # Cortesias (#2668): solo POS/manual — rechazar en domicilio/online.
+                if any(row['es_cortesia'] for row in product_rows):
+                    raise APIError(
+                        "Courtesy products are only available at POS/manual sale",
+                        status_code=400,
+                    )
 
                 # Add all items
                 cart_total = Decimal('0')

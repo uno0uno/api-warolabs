@@ -71,6 +71,10 @@ def resolve_line_unit_price(
     es_cortesia = bool(row.get("es_cortesia", False))
     mods = modifiers or []
 
+    # Cortesias (#2668): siempre $0 aunque el catalogo legacy tenga precio.
+    if es_cortesia:
+        return Decimal("0")
+
     if open_priced:
         if mods:
             raise ValidationError(

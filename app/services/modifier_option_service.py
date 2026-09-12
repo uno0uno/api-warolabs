@@ -35,6 +35,7 @@ async def resolve_modifier_selections(
     conn,
     product_id: UUID,
     modifiers: List[Dict[str, Any]],
+    is_courtesy: bool = False,
 ) -> List[Dict[str, Any]]:
     """Resolve and validate modifier selections from persisted configuration."""
     requested = modifiers or []
@@ -128,6 +129,12 @@ async def resolve_modifier_selections(
                 f"Group '{group['name']}' allows at most {group['max_qty']} selection(s), got {count}",
                 status_code=422,
             )
+    # Cortesias (#2668): sin modificadores con cobro — solo adiciones $0.
+    if is_courtesy and any(Decimal(str(m["subtotal"])) > 0 for m in resolved):
+        raise APIError(
+            "Courtesy lines do not allow priced modifiers",
+            status_code=400,
+        )
     return resolved
 
 

@@ -4279,8 +4279,14 @@ async def update_tab_item_content(
         old_modifiers = await _fetch_order_item_modifiers(conn, order_item_id)
         old_notes = row["notes"]
         quantity = float(row["quantity"])
+        # Cortesias (#2668): la edicion tampoco admite extras con cobro.
+        courtesy_row = await conn.fetchrow(
+            "SELECT es_cortesia FROM product WHERE id = $1 AND tenant_id = $2",
+            row["product_id"], tenant_id,
+        )
         modifiers = await resolve_modifier_selections(
-            conn, row["product_id"], modifiers or []
+            conn, row["product_id"], modifiers or [],
+            is_courtesy=bool(courtesy_row["es_cortesia"]) if courtesy_row else False,
         )
 
         await conn.execute(
@@ -5065,6 +5071,7 @@ async def _add_tab_items_core(
             conn,
             UUID(str(item["product_id"])),
             item.get("modifiers") or [],
+            is_courtesy=bool(pricing_map.get(str(item["product_id"]), {}).get("es_cortesia", False)),
         )
 
     for item in items:

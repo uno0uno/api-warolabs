@@ -5176,11 +5176,23 @@ async def create_manual_order(
                         )
                     )
 
+                # Courtesy flags first (#2668): priced modifiers rejected on courtesy lines.
+                courtesy_ids = [UUID(str(item["product_id"])) for item in items]
+                courtesy_rows = await conn.fetch(
+                    "SELECT id, es_cortesia FROM product WHERE tenant_id = $1 AND id = ANY($2::uuid[])",
+                    tenant_id,
+                    courtesy_ids,
+                )
+                courtesy_flags = {str(r["id"]): bool(r["es_cortesia"]) for r in courtesy_rows}
                 for item in items:
+                    # Cortesias (#2668): precio siempre $0 aunque venga legacy con precio.
+                    if courtesy_flags.get(str(item["product_id"]), False):
+                        item["unit_price"] = 0
                     item["modifiers"] = await resolve_modifier_selections(
                         conn,
                         UUID(str(item["product_id"])),
                         item.get("modifiers", []),
+                        is_courtesy=courtesy_flags.get(str(item["product_id"]), False),
                     )
 
                 # Courtesy rule (uno0uno/warocol.com#2655): zero-price lines
@@ -5190,12 +5202,7 @@ async def create_manual_order(
                     if float(item.get("unit_price") or 0) == 0
                 ]
                 if zero_lines:
-                    flag_rows = await conn.fetch(
-                        "SELECT id, es_cortesia FROM product WHERE tenant_id = $1 AND id = ANY($2::uuid[])",
-                        tenant_id,
-                        [UUID(str(item["product_id"])) for item in zero_lines],
-                    )
-                    flags = {str(r["id"]): bool(r["es_cortesia"]) for r in flag_rows}
+                    flags = courtesy_flags
                     bad = [
                         str(item["product_id"]) for item in zero_lines
                         if not flags.get(str(item["product_id"]), False)
