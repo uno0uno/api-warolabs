@@ -78,7 +78,18 @@ async def test_cogs_idempotent_across_both_modules():
     from app.services import cierre_service
 
     insert_capture: dict = {}
-    conn = _conn_with({"existing": uuid4(), "non_courtesy": 0}, insert_capture)
+    queries: list = []
+    orig_fetchval = None
+
+    conn = MagicMock()
+
+    async def _fetchval(query, *args):
+        queries.append(query)
+        if "tenant_journal_entries" in query:
+            return uuid4()
+        return None
+
+    conn.fetchval = _fetchval
     with patch.object(
         cierre_service, "resolve_account",
         new=AsyncMock(return_value=SimpleNamespace(id=uuid4())),
@@ -87,6 +98,53 @@ async def test_cogs_idempotent_across_both_modules():
             conn, uuid4(), uuid4(), date(2026, 9, 12), order_number=9
         )
     assert insert_capture == {}
+    assert any(
+        "orden_cortesia" in q and "tenant_journal_entries" in q for q in queries
+    )
+
+
+@pytest.mark.asyncio
+async def test_void_reverses_courtesy_entry():
+    from app.services import cierre_service
+
+    entry_id = uuid4()
+    conn = MagicMock()
+    calls = {"n": 0}
+    seen_queries: list = []
+
+    async def _fetch(query, *args):
+        calls["n"] += 1
+        seen_queries.append(query)
+        if calls["n"] == 1:
+            return [{
+                "id": entry_id, "entry_date": date(2026, 9, 12),
+                "period_year": 2026, "period_month": 9,
+                "description": "CMV #9 — cortesía",
+                "total_debit": 1200.0, "total_credit": 1200.0,
+                "source_module": "orden_cortesia",
+            }]
+        return [{
+            "account_id": uuid4(), "debit": 1200.0, "credit": 0.0,
+            "description": "CMV #9 — cortesía", "line_order": 0,
+        }]
+
+    conn.fetch = _fetch
+    conn.fetchval = AsyncMock(return_value=None)
+    conn.fetchrow = AsyncMock(return_value={"id": uuid4()})
+    conn.execute = AsyncMock()
+
+    @asynccontextmanager
+    async def _tx():
+        yield None
+
+    conn.transaction.side_effect = lambda: _tx()
+
+    await cierre_service._void_order_gl_entries(conn, uuid4(), uuid4(), reason="test")
+
+    posted = [q for q in seen_queries if "tenant_journal_entries" in q]
+    assert any("orden_cortesia" in q for q in posted)
+    voids = [c.args[0] for c in conn.execute.await_args_list if "voided" in c.args[0]]
+    assert voids, "expected void UPDATE"
 
 
 @pytest.mark.asyncio

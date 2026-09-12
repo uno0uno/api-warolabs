@@ -3,10 +3,11 @@ POS Cart Service
 Handles cart persistence for POS system
 """
 import asyncio
+import json
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Sequence
 from uuid import UUID
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from fastapi import Request
 from app.database import get_db_connection
 from app.core.middleware import require_valid_session
@@ -2264,8 +2265,6 @@ async def complete_pos_order(
                     raise APIError("Cannot complete order with empty cart", status_code=400)
 
                 # Cortesias (#2671): auditoria quien+motivo en extra_attributes.
-                import json as _json
-                from datetime import datetime as _datetime, timezone as _timezone
                 _courtesy_pids = [item['product']['id'] for item in items]
                 _courtesy_rows = await conn.fetch(
                     "SELECT id FROM product WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND COALESCE(es_cortesia, FALSE) = TRUE",
@@ -2279,10 +2278,10 @@ async def complete_pos_order(
                         "courtesy": {
                             "by": str(user_id) if user_id else None,
                             "reason": (courtesy_reason or "").strip()[:280] or None,
-                            "at": _datetime.now(_timezone.utc).isoformat(),
+                            "at": datetime.now(timezone.utc).isoformat(),
                         }
                     }
-                _extra_attributes_json = _json.dumps(_extra_attributes) if _extra_attributes else None
+                _extra_attributes_json = json.dumps(_extra_attributes) if _extra_attributes else None
 
                 tax_config = await _get_tenant_tax_config(conn, tenant_id)
                 _tip_taxable = bool(tip_taxable) if tip_amount > 0 else False

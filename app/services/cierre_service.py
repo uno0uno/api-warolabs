@@ -820,9 +820,11 @@ async def _post_order_cogs_gl_entry(
     non_courtesy = await conn.fetchval(
         """SELECT COUNT(*)
             FROM order_items oi
-            JOIN product p ON p.id = oi.product_id
+            LEFT JOIN product p ON p.id = oi.product_id
+            LEFT JOIN product_variants pv ON pv.id = oi.variant_id
+            LEFT JOIN product pv_p ON pv_p.id = pv.product_id
             WHERE oi.order_id = $1
-              AND COALESCE(p.es_cortesia, FALSE) = FALSE""",
+              AND COALESCE(p.es_cortesia, pv_p.es_cortesia, FALSE) = FALSE""",
         order_id,
     )
     source_module = 'orden_cortesia' if int(non_courtesy or 0) == 0 else 'orden_cogs'
@@ -959,7 +961,7 @@ async def _void_order_gl_entries(
     reason: str = "Cancelación de venta",
 ) -> None:
     """
-    Void posted sale journals (`orden` and `orden_cogs`) and post reversals.
+    Void posted sale journals (`orden`, `orden_cogs`, `orden_cortesia`) and post reversals.
     Original rows stay visible as voided. Skips if none posted or period closed.
     """
     entries = await conn.fetch(
@@ -968,7 +970,7 @@ async def _void_order_gl_entries(
            FROM tenant_journal_entries
            WHERE tenant_id = $1
              AND source_id = $2
-             AND source_module IN ('orden', 'orden_cogs')
+             AND source_module IN ('orden', 'orden_cogs', 'orden_cortesia')
              AND status = 'posted'
            ORDER BY created_at ASC""",
         tenant_id,
