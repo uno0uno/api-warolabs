@@ -3301,9 +3301,12 @@ async def get_orders_metrics(
                         COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (WHERE o.status = 'completed'), 0) as total_sales,
                         COALESCE(
                             SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (WHERE o.status = 'completed')
-                            / NULLIF(COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'completed'), 0),
+                            / NULLIF(COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'completed' AND o.total_amount > 0), 0),
                             0
                         ) as avg_ticket,
+                        -- Cortesias (#2670): fuera de ingreso/ticket, columna propia.
+                        COALESCE(SUM(oi.quantity) FILTER (WHERE o.status = 'completed' AND COALESCE(p.es_cortesia, FALSE)), 0) as courtesy_units,
+                        COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'completed' AND COALESCE(p.es_cortesia, FALSE)) as courtesy_orders,
                         0 as discount_count,
                         0 as total_discount_amount
                     FROM orders o
@@ -3351,7 +3354,22 @@ async def get_orders_metrics(
                         COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled_orders,
                         COUNT(*) FILTER (WHERE status = 'pending') as pending_orders,
                         COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'), 0) as total_sales,
-                        COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'), 0) as avg_ticket,
+                        COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed' AND total_amount > 0), 0) as avg_ticket,
+                        -- Cortesias (#2670): columna propia tambien sin filtro de categoria.
+                        COALESCE((
+                            SELECT SUM(oi.quantity) FROM orders o2
+                            JOIN order_items oi ON oi.order_id = o2.id
+                            JOIN product p ON p.id = oi.product_id
+                            WHERE {where_clause} AND o2.status = 'completed'
+                              AND COALESCE(p.es_cortesia, FALSE)
+                        ), 0) as courtesy_units,
+                        COALESCE((
+                            SELECT COUNT(DISTINCT oi.order_id) FROM orders o2
+                            JOIN order_items oi ON oi.order_id = o2.id
+                            JOIN product p ON p.id = oi.product_id
+                            WHERE {where_clause} AND o2.status = 'completed'
+                              AND COALESCE(p.es_cortesia, FALSE)
+                        ), 0) as courtesy_orders,
                         COUNT(*) FILTER (WHERE status = 'completed' AND discount_amount > 0) as discount_count,
                         COALESCE(SUM(discount_amount) FILTER (WHERE status = 'completed' AND discount_amount > 0), 0) as total_discount_amount
                     FROM orders
@@ -3420,6 +3438,8 @@ async def get_orders_metrics(
                     "avg_ticket": float(row['avg_ticket']),
                     "discount_count": int(row['discount_count']),
                     "total_discount_amount": float(row['total_discount_amount']),
+                    "courtesy_units": int(dict(row).get('courtesy_units', 0) or 0),
+                    "courtesy_orders": int(dict(row).get('courtesy_orders', 0) or 0),
                     "total_standard_tax": _total_std_tax,
                     "total_liquor_tax": _total_liq_tax,
                     "standard_tax_label": _tax_label,
@@ -3492,9 +3512,11 @@ async def get_orders_dashboard(
                         COALESCE(SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (WHERE o.status = 'completed'{main_filter_sql}), 0) as main_sales,
                         COALESCE(
                             SUM(COALESCE(oi.net_total, oi.subtotal)) FILTER (WHERE o.status = 'completed'{main_filter_sql})
-                            / NULLIF(COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'completed'{main_filter_sql}), 0),
+                            / NULLIF(COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'completed' AND o.total_amount > 0{main_filter_sql}), 0),
                             0
                         ) as main_avg_ticket,
+                        COALESCE(SUM(oi.quantity) FILTER (WHERE o.status = 'completed' AND COALESCE(p.es_cortesia, FALSE){main_filter_sql}), 0) as main_courtesy_units,
+                        COUNT(DISTINCT o.id) FILTER (WHERE o.status = 'completed' AND COALESCE(p.es_cortesia, FALSE){main_filter_sql}) as main_courtesy_orders,
                         0 as main_discount_count,
                         0 as main_total_discount,
 
@@ -3557,9 +3579,26 @@ async def get_orders_dashboard(
                         -- Main: all-time (with optional payment/status filters)
                         COUNT(*) FILTER (WHERE status = 'completed'{main_filter_sql}) as main_completed,
                         COALESCE(SUM(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_sales,
-                        COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed'{main_filter_sql}), 0) as main_avg_ticket,
+                        COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed' AND total_amount > 0{main_filter_sql}), 0) as main_avg_ticket,
                         COUNT(*) FILTER (WHERE status = 'completed' AND discount_amount > 0{main_filter_sql}) as main_discount_count,
                         COALESCE(SUM(discount_amount) FILTER (WHERE status = 'completed' AND discount_amount > 0{main_filter_sql}), 0) as main_total_discount,
+                        -- Cortesias (#2670): columna propia tambien sin filtro de categoria.
+                        COALESCE((
+                            SELECT SUM(oi.quantity) FROM orders o2
+                            JOIN order_items oi ON oi.order_id = o2.id
+                            JOIN product p ON p.id = oi.product_id
+                            WHERE o2.tenant_id = $1 AND {ANALYTICS_SALES_FILTER_ALIAS_O}
+                              AND o2.status = 'completed'{main_filter_sql}
+                              AND COALESCE(p.es_cortesia, FALSE)
+                        ), 0) as main_courtesy_units,
+                        COALESCE((
+                            SELECT COUNT(DISTINCT oi.order_id) FROM orders o2
+                            JOIN order_items oi ON oi.order_id = o2.id
+                            JOIN product p ON p.id = oi.product_id
+                            WHERE o2.tenant_id = $1 AND {ANALYTICS_SALES_FILTER_ALIAS_O}
+                              AND o2.status = 'completed'{main_filter_sql}
+                              AND COALESCE(p.es_cortesia, FALSE)
+                        ), 0) as main_courtesy_orders,
 
                         -- Month-to-date (with optional payment/status filters)
                         COUNT(*) FILTER (
@@ -3764,6 +3803,8 @@ async def get_orders_dashboard(
                         "total_sales": main_sales,
                         "completed_orders": row['main_completed'],
                         "avg_ticket": float(row['main_avg_ticket']),
+                        "courtesy_units": int(dict(row).get('main_courtesy_units', 0) or 0),
+                        "courtesy_orders": int(dict(row).get('main_courtesy_orders', 0) or 0),
                         "discount_count": int(row['main_discount_count']),
                         "total_discount_amount": float(row['main_total_discount']),
                         "total_standard_tax": _main_std,

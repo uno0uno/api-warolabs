@@ -1800,6 +1800,23 @@ async def _compute_preview(
         tenant_id, *open_tables_params,
     )
 
+    # Cortesias (#2670): linea informativa — no tocan cash_expected.
+    courtesy_row = await conn.fetchrow(
+        f"""
+        SELECT
+            COALESCE(SUM(oi.quantity), 0) AS courtesy_units,
+            COUNT(DISTINCT oi.order_id) AS courtesy_orders
+        FROM order_items oi
+        JOIN orders o ON oi.order_id = o.id
+        JOIN product p ON p.id = oi.product_id
+        WHERE o.tenant_id = $1
+          AND COALESCE(p.es_cortesia, FALSE) = TRUE
+          {status_filter_o}
+          {date_filter_o}
+        """,
+        tenant_id, *date_params,
+    )
+
     total_cash = method_totals.get("cash", 0.0)
     gastos_efectivo = float(gastos_row["gastos_efectivo"])
     cash_purchases = float(cash_purchases_row["cash_purchases"])
@@ -1834,6 +1851,8 @@ async def _compute_preview(
         "cashPurchases":    cash_purchases,
         "cashExpected":     cash_expected,
         "openTablesCount":  int(open_tables_row["open_tables_count"]),
+        "courtesyUnits":    int(courtesy_row["courtesy_units"] or 0),
+        "courtesyOrders":   int(courtesy_row["courtesy_orders"] or 0),
     }
 
 

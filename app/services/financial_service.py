@@ -36,10 +36,13 @@ async def _get_products_analysis_for_tenant(tenant_id: str, period: int = 365, c
                   FROM orders o
                   INNER JOIN order_items oi ON o.id = oi.order_id
                   INNER JOIN tenant_members tm ON o.user_id = tm.user_id
+                  LEFT JOIN product p ON p.id = oi.product_id
                   WHERE o.status = 'completed'
                     AND tm.tenant_id = $1::uuid
                     AND o.order_date >= NOW() - INTERVAL '{period} days'
                     AND (oi.product_id IS NOT NULL OR oi.variant_id IS NOT NULL)
+                    -- Cortesias (#2670): fuera de ingreso/margen/ticket.
+                    AND COALESCE(p.es_cortesia, FALSE) = FALSE
                 ),
                 product_analytics AS (
                   SELECT
@@ -212,7 +215,8 @@ async def get_obstacles_analysis(request: Request, response: Response, period: i
                 financial_metrics AS (
                   SELECT 
                     COALESCE(SUM(ro.total_amount), 0) as total_revenue,
-                    COALESCE(AVG(ro.total_amount), 0) as avg_order_value,
+                    -- Cortesias (#2670): ordenes $0 no arrastran el ticket.
+                    COALESCE(AVG(ro.total_amount) FILTER (WHERE ro.total_amount > 0), 0) as avg_order_value,
                     50000 as total_investment
                   FROM recent_orders ro
                   WHERE ro.status = 'completed'

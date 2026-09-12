@@ -1140,6 +1140,8 @@ async def _get_menu_analysis_for_tenant(
                 LEFT JOIN orders o ON oi.order_id = o.id
                 WHERE p.tenant_id = $1
                     AND p.is_available = true
+                    -- Cortesias (#2670): fuera de ingreso/margen/clasificacion.
+                    AND COALESCE(p.es_cortesia, FALSE) = FALSE
                     {category_filter}
                     AND (
                         o.id IS NULL OR (
@@ -1206,6 +1208,27 @@ async def _get_menu_analysis_for_tenant(
             *fetch_args,
         )
 
+        # Cortesias (#2670): columna propia — uds + ordenes, fuera de clasificacion.
+        courtesy_row = await conn.fetchrow(
+            """
+            SELECT
+                COALESCE(SUM(oi.quantity), 0) AS courtesy_units,
+                COUNT(DISTINCT oi.order_id) AS courtesy_orders
+            FROM order_items oi
+            JOIN orders o ON oi.order_id = o.id
+            JOIN product p ON p.id = oi.product_id
+            WHERE p.tenant_id = $1
+                AND COALESCE(p.es_cortesia, FALSE) = TRUE
+                AND o.status = 'completed'
+                AND DATE(o.order_date AT TIME ZONE $4) >= $2
+                AND DATE(o.order_date AT TIME ZONE $4) <= $3
+            """,
+            tenant_id,
+            parsed_date_from,
+            parsed_date_to,
+            timezone_name,
+        )
+
         menu_items = []
         for row in rows:
             perceived = row['costo_percibido']
@@ -1255,7 +1278,9 @@ async def _get_menu_analysis_for_tenant(
                     "plowhorses": plowhorses,
                     "puzzles": puzzles,
                     "dogs": dogs,
-                    "avg_profit_margin_pct": round(avg_margin, 1)
+                    "avg_profit_margin_pct": round(avg_margin, 1),
+                    "courtesy_units": int(courtesy_row['courtesy_units'] or 0),
+                    "courtesy_orders": int(courtesy_row['courtesy_orders'] or 0)
                 },
                 "period": {
                     "from": parsed_date_from.isoformat(),
