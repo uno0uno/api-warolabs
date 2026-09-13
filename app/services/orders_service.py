@@ -3587,7 +3587,7 @@ async def get_orders_dashboard(
                             SELECT SUM(oi.quantity) FROM orders o2
                             JOIN order_items oi ON oi.order_id = o2.id
                             JOIN product p ON p.id = oi.product_id
-                            WHERE o2.tenant_id = $1 AND {ANALYTICS_SALES_FILTER_ALIAS_O}
+                            WHERE o2.tenant_id = $1 AND (o2.pos_cart_id IS NOT NULL OR o2.table_session_id IS NOT NULL OR o2.online_cart_id IS NOT NULL OR o2.extra_attributes->>'source' = 'manual')
                               AND o2.status = 'completed'{main_filter_sql}
                               AND COALESCE(p.es_cortesia, FALSE)
                         ), 0) as main_courtesy_units,
@@ -3595,7 +3595,7 @@ async def get_orders_dashboard(
                             SELECT COUNT(DISTINCT oi.order_id) FROM orders o2
                             JOIN order_items oi ON oi.order_id = o2.id
                             JOIN product p ON p.id = oi.product_id
-                            WHERE o2.tenant_id = $1 AND {ANALYTICS_SALES_FILTER_ALIAS_O}
+                            WHERE o2.tenant_id = $1 AND (o2.pos_cart_id IS NOT NULL OR o2.table_session_id IS NOT NULL OR o2.online_cart_id IS NOT NULL OR o2.extra_attributes->>'source' = 'manual')
                               AND o2.status = 'completed'{main_filter_sql}
                               AND COALESCE(p.es_cortesia, FALSE)
                         ), 0) as main_courtesy_orders,
