@@ -152,6 +152,7 @@ ANALYTICS_SALES_FILTER = (
     "OR online_cart_id IS NOT NULL "
     "OR extra_attributes->>'source' = 'manual')"
 )
+# Alias o for FROM orders o; use o2. prefix inside subqueries to avoid ambiguous tenant_id
 ANALYTICS_SALES_FILTER_ALIAS_O = (
     "(o.pos_cart_id IS NOT NULL OR o.table_session_id IS NOT NULL "
     "OR o.online_cart_id IS NOT NULL "
