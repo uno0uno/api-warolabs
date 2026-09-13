@@ -3346,6 +3346,11 @@ async def get_orders_metrics(
                     params.append(status)
 
                 where_clause = " AND ".join(where_conditions)
+                # Courtesy subqueries need qualified alias to avoid ambiguous column (outer orders vs inner o2)
+                where_clause_o2 = where_clause
+                for _col, _qcol in [("payment_method_id", "o2.payment_method_id"), ("payment_method", "o2.payment_method"), ("table_session_id", "o2.table_session_id"), ("online_cart_id", "o2.online_cart_id"), ("pos_cart_id", "o2.pos_cart_id"), ("extra_attributes", "o2.extra_attributes"), ("order_date", "o2.order_date"), ("tenant_id", "o2.tenant_id"), ("status", "o2.status")]:
+                    where_clause_o2 = where_clause_o2.replace(_col, _qcol)
+                where_clause_o2 = where_clause_o2.replace("o2.o2.", "o2.")
 
                 metrics_query = f"""
                     SELECT
@@ -3357,17 +3362,17 @@ async def get_orders_metrics(
                         COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed' AND total_amount > 0), 0) as avg_ticket,
                         -- Cortesias (#2670): columna propia tambien sin filtro de categoria.
                         COALESCE((
-                            SELECT SUM(oi.quantity) FROM orders
-                            JOIN order_items oi ON oi.order_id = orders.id
+                            SELECT SUM(oi.quantity) FROM orders o2
+                            JOIN order_items oi ON oi.order_id = o2.id
                             JOIN product p ON p.id = oi.product_id
-                            WHERE {where_clause} AND status = 'completed'
+                            WHERE {where_clause_o2} AND o2.status = 'completed'
                               AND COALESCE(p.es_cortesia, FALSE)
                         ), 0) as courtesy_units,
                         COALESCE((
-                            SELECT COUNT(DISTINCT oi.order_id) FROM orders
-                            JOIN order_items oi ON oi.order_id = orders.id
+                            SELECT COUNT(DISTINCT oi.order_id) FROM orders o2
+                            JOIN order_items oi ON oi.order_id = o2.id
                             JOIN product p ON p.id = oi.product_id
-                            WHERE {where_clause} AND status = 'completed'
+                            WHERE {where_clause_o2} AND o2.status = 'completed'
                               AND COALESCE(p.es_cortesia, FALSE)
                         ), 0) as courtesy_orders,
                         COUNT(*) FILTER (WHERE status = 'completed' AND discount_amount > 0) as discount_count,
