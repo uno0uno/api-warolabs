@@ -3357,17 +3357,17 @@ async def get_orders_metrics(
                         COALESCE(AVG(total_amount) FILTER (WHERE status = 'completed' AND total_amount > 0), 0) as avg_ticket,
                         -- Cortesias (#2670): columna propia tambien sin filtro de categoria.
                         COALESCE((
-                            SELECT SUM(oi.quantity) FROM orders o2
-                            JOIN order_items oi ON oi.order_id = o2.id
+                            SELECT SUM(oi.quantity) FROM orders
+                            JOIN order_items oi ON oi.order_id = orders.id
                             JOIN product p ON p.id = oi.product_id
-                            WHERE {where_clause} AND o2.status = 'completed'
+                            WHERE {where_clause} AND status = 'completed'
                               AND COALESCE(p.es_cortesia, FALSE)
                         ), 0) as courtesy_units,
                         COALESCE((
-                            SELECT COUNT(DISTINCT oi.order_id) FROM orders o2
-                            JOIN order_items oi ON oi.order_id = o2.id
+                            SELECT COUNT(DISTINCT oi.order_id) FROM orders
+                            JOIN order_items oi ON oi.order_id = orders.id
                             JOIN product p ON p.id = oi.product_id
-                            WHERE {where_clause} AND o2.status = 'completed'
+                            WHERE {where_clause} AND status = 'completed'
                               AND COALESCE(p.es_cortesia, FALSE)
                         ), 0) as courtesy_orders,
                         COUNT(*) FILTER (WHERE status = 'completed' AND discount_amount > 0) as discount_count,
