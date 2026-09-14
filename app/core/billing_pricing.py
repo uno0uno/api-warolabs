@@ -13,7 +13,7 @@ from typing import Literal, Optional
 from app.core.tenant_prefs import COUNTRY_CURRENCY_PAIRS
 
 ProviderEnvironment = Literal["prod", "test"]
-PriceSegment = Literal["usd_9", "usd_30", "eur_30"]
+PriceSegment = Literal["usd_9", "usd_30", "eur_30", "cop_30k"]
 
 # Eurozone countries in COUNTRY_CURRENCY_PAIRS that charge in EUR.
 EUROZONE_COUNTRIES = frozenset(
@@ -42,8 +42,8 @@ ANNUAL_MULTIPLIER = 10
 @dataclass(frozen=True)
 class PriceOffer:
     segment: PriceSegment
-    currency: Literal["USD", "EUR"]
-    monthly_amount_minor: int  # cents / euro cents
+    currency: Literal["USD", "EUR", "COP"]
+    monthly_amount_minor: int  # cents / euro cents; COP minor = centavos (3000000 = 30k)
     annual_amount_minor: int
     lemon_squeezy_variant_id_test: str
     lemon_squeezy_variant_id_live: str
@@ -80,6 +80,14 @@ SEGMENT_OFFERS: dict[PriceSegment, PriceOffer] = {
         lemon_squeezy_variant_id_test="TODO_LEMON_SQUEEZY_VARIANT_EUR_30_MONTHLY_TEST",
         lemon_squeezy_variant_id_live="TODO_LEMON_SQUEEZY_VARIANT_EUR_30_MONTHLY_LIVE",
     ),
+    "cop_30k": PriceOffer(
+        segment="cop_30k",
+        currency="COP",
+        monthly_amount_minor=3000000,
+        annual_amount_minor=3000000 * ANNUAL_MULTIPLIER,
+        lemon_squeezy_variant_id_test="TODO_MERCADOPAGO_COP_30K_MONTHLY_TEST",
+        lemon_squeezy_variant_id_live="TODO_MERCADOPAGO_COP_30K_MONTHLY_LIVE",
+    ),
 }
 
 
@@ -91,8 +99,10 @@ def normalize_country_code(country_code: Optional[str]) -> str:
 
 
 def resolve_price_segment(country_code: Optional[str]) -> PriceSegment:
-    """Map tenant country to list segment (epic #793 + delta #794)."""
+    """Map tenant country to list segment (epic #793 + delta #794, #2698 cop_30k)."""
     code = normalize_country_code(country_code)
+    if code == "CO":
+        return "cop_30k"
     if code in EUROZONE_COUNTRIES:
         return "eur_30"
     if code in USD_CHARGE_COUNTRIES or code in INTL_USD_30_ALLOWLIST:
