@@ -1563,9 +1563,7 @@ def filter_plans_for_country(
     plans: List[Dict[str, Any]],
     country_code: Optional[str],
 ) -> List[Dict[str, Any]]:
-    """Hide Colombia-only electronic invoicing plan outside CO (#2201)."""
-    if is_colombia_country(country_code):
-        return plans
+    """Hide electronic invoicing add-on (now manual, #2703); only Starter+Pro for all."""
     return [p for p in plans if p.get("slug") != ELECTRONIC_INVOICE_PLAN_SLUG]
 
 
