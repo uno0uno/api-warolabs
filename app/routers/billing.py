@@ -132,6 +132,8 @@ async def subscribe(body: SubscribeBody, request: Request):
             tenant_slug=ctx.get("slug"),
             tenant_id=str(tenant_id) if tenant_id else None,
         )
+        is_co = (ctx.get("country_code") or "").upper() == "CO" or offer.segment == "cop_30k"
+        provider_name = "mercadopago" if is_co else "lemon_squeezy"
 
         if is_pending_onboarding:
             attempt_id = await billing_service.create_onboarding_payment_attempt(
@@ -141,9 +143,25 @@ async def subscribe(body: SubscribeBody, request: Request):
                 amount_in_cents=offer.monthly_amount_minor,
                 provider_environment=provider_environment,
                 currency=offer.currency,
-                provider="lemon_squeezy",
+                provider=provider_name,
             )
         else:
+            if is_co:
+                from app.services import mercadopago_subscription_service
+                mp = await mercadopago_subscription_service.create_preapproval(
+                    payer_email=body.payer_email or ctx.get("email") or "",
+                    back_url=redirect_url,
+                    notification_url=f"{frontend_host}/payments/webhooks/mercadopago",
+                )
+                return await billing_service.subscribe_tenant(
+                    conn,
+                    tenant_id=tenant_id,
+                    plan_id=body.plan_id,
+                    billing_cycle=body.billing_cycle,
+                    checkout_url=mp["init_point"],
+                    gateway_reference=mp["preapproval_id"],
+                    provider="mercadopago",
+                )
             ls_result = await lemon_squeezy_service.create_checkout(
                 offer=offer,
                 environment=provider_environment,
@@ -163,16 +181,27 @@ async def subscribe(body: SubscribeBody, request: Request):
                 provider="lemon_squeezy",
             )
 
-    ls_result = await lemon_squeezy_service.create_checkout(
-        offer=offer,
-        environment=provider_environment,
-        tenant_id=tenant_id,
-        plan_id=body.plan_id,
-        billing_cycle=body.billing_cycle,
-        redirect_url=redirect_url,
-        customer_email=body.payer_email,
-        attempt_id=attempt_id,
-    )
+    if is_co:
+        from app.services import mercadopago_subscription_service
+        mp = await mercadopago_subscription_service.create_preapproval(
+            payer_email=body.payer_email or "",
+            back_url=redirect_url,
+            notification_url=f"{frontend_host}/payments/webhooks/mercadopago",
+        )
+        ls_result = {"checkout_url": mp["init_point"], "gateway_reference": mp["preapproval_id"]}
+        provider_name = "mercadopago"
+    else:
+        ls_result = await lemon_squeezy_service.create_checkout(
+            offer=offer,
+            environment=provider_environment,
+            tenant_id=tenant_id,
+            plan_id=body.plan_id,
+            billing_cycle=body.billing_cycle,
+            redirect_url=redirect_url,
+            customer_email=body.payer_email,
+            attempt_id=attempt_id,
+        )
+        provider_name = "lemon_squeezy"
     async with get_db_connection() as conn:
         await billing_service.attach_onboarding_payment_link(
             conn,
@@ -190,7 +219,7 @@ async def subscribe(body: SubscribeBody, request: Request):
         "currency": offer.currency,
         "billing_cycle": "monthly",
         "status": "pending",
-        "provider": "lemon_squeezy",
+        "provider": provider_name,
     }
 
 
