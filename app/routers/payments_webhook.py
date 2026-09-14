@@ -11,7 +11,7 @@ import json
 
 from fastapi import APIRouter, BackgroundTasks, Request
 
-from app.services import lemon_squeezy_service, wompi_webhook_router_service
+from app.services import lemon_squeezy_service, mercadopago_subscription_service, wompi_webhook_router_service
 
 router = APIRouter(prefix="/payments/webhooks", tags=["Payments Webhooks"])
 
@@ -74,3 +74,22 @@ async def lemon_squeezy_sandbox_webhook(
     return await lemon_squeezy_service.handle_verified_webhook(
         payload, environment="test", background_tasks=background_tasks
     )
+
+
+@router.post("/mercadopago", status_code=200)
+async def mercadopago_webhook(request: Request, background_tasks: BackgroundTasks):
+    """MercadoPago webhook for CO preapproval payments (#2700)."""
+    raw = await request.body()
+    # MP sends x-signature + x-request-id
+    ok = mercadopago_subscription_service.verify_signature(
+        raw_body=raw,
+        signature=request.headers.get("x-signature") or request.headers.get("X-Signature"),
+        request_id=request.headers.get("x-request-id") or request.headers.get("X-Request-Id"),
+    )
+    if not ok:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=401, detail="Invalid MP signature")
+    payload = json.loads(raw.decode("utf-8")) if raw else {}
+    # Expect payment type; fallback to raw
+    return {"received": True, "provider": "mercadopago"}
