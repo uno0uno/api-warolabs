@@ -144,6 +144,11 @@ class Settings(BaseSettings):
         default=None, alias='LEMON_SQUEEZY_VARIANT_EUR_30_MONTHLY_TEST'
     )
 
+
+    # MercadoPago — CO subscription COP 30k (#2700)
+    mercadopago_access_token: str | None = Field(default=None, alias='MERCADOPAGO_ACCESS_TOKEN')
+    mercadopago_webhook_secret: str | None = Field(default=None, alias='MERCADOPAGO_WEBHOOK_SECRET')
+    mercadopago_access_token_test: str | None = Field(default=None, alias='MERCADOPAGO_ACCESS_TOKEN_TEST')
     # Cron secret — grace period reminders (issue #62)
     cron_secret: Optional[str] = Field(default=None, alias='CRON_SECRET')
 
