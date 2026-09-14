@@ -16,11 +16,33 @@ from app.services.modifier_option_service import (
     calculated_modifier_option_unit_cost,
     validate_modifier_option_fields,
 )
-from app.services.billing_service import check_plan_quota_growth, check_plan_quota_scoped
+from app.services.billing_service import check_plan_quota_growth
+from decimal import Decimal
+from app.services.billing_service import check_plan_quota_scoped
 from app.services.operation_events_service import DOMAIN_MENU, record_module_event
 import logging
 
 logger = logging.getLogger(__name__)
+
+# MODIFIER yield normalization (2715) — like products 80->0.1
+async def _mod_display_to_store(conn, tenant_id, recipe_base_type_id, qty_display):
+    from decimal import Decimal
+    if not recipe_base_type_id or qty_display is None:
+        return qty_display
+    row = await conn.fetchrow("SELECT rendimiento_total FROM product_base_types WHERE id=$1 AND tenant_id=$2", recipe_base_type_id, tenant_id)
+    y = row["rendimiento_total"] if row else None
+    if y is not None and Decimal(str(y)) > 0 and Decimal(str(qty_display)) >= Decimal("1"):
+        return Decimal(str(qty_display)) / Decimal(str(y))
+    return Decimal(str(qty_display))
+
+def _mod_store_to_display(store_qty, rendimiento_total):
+    from decimal import Decimal
+    if rendimiento_total is None or Decimal(str(rendimiento_total)) == 0:
+        return store_qty
+    if store_qty is not None and Decimal(str(store_qty)) < Decimal("1") and Decimal(str(store_qty)) > 0:
+        return (Decimal(str(store_qty)) * Decimal(str(rendimiento_total))).quantize(Decimal("0.0001")).normalize()
+    return store_qty
+
 
 _MODIFIER_SELECT_COLS = """
     m.id,
@@ -48,6 +70,8 @@ _MODIFIER_SELECT_COLS = """
     i.controla_inventario,
     i.is_resale as ingredient_is_resale,
     pbt.name as recipe_base_name,
+    pbt.rendimiento_total,
+    pbt.unidad_rendimiento,
     lp.name as linked_product_name
 """
 
@@ -137,7 +161,7 @@ async def _build_modifier(
         "ingredient_quantity": row["ingredient_quantity"],
         "ingredient_unit": row["ingredient_unit"],
         "recipe_base_type_id": row["recipe_base_type_id"],
-        "recipe_base_quantity": row["recipe_base_quantity"] or 1,
+        "recipe_base_quantity": float(_mod_store_to_display(row["recipe_base_quantity"] or 1, row.get("rendimiento_total"))),
         "linked_product_id": row["linked_product_id"],
         "linked_product_quantity": row["linked_product_quantity"] or 1,
         "recipe_lines": recipe_lines or None,
@@ -184,6 +208,12 @@ async def _insert_modifier(conn, group_id: UUID, modifier, *, skip_quota_check: 
                 group_id,
             )
 
+    # Normalize RECIPE quantity display->store (2715)
+    recipe_store_qty = None
+    if option_type == "RECIPE" and modifier.recipe_base_type_id:
+        # reuse tenant_id if already fetched else fetch
+        _t = tenant_id if 'tenant_id' in locals() and tenant_id else await conn.fetchval("SELECT tenant_id FROM modifier_groups WHERE id=$1", group_id)
+        recipe_store_qty = await _mod_display_to_store(conn, _t, modifier.recipe_base_type_id, modifier.recipe_base_quantity)
     ing_qty = modifier.ingredient_quantity
     ing_unit = modifier.ingredient_unit
     if modifier.ingredient_id and ing_qty is not None and ing_unit:
@@ -220,7 +250,7 @@ async def _insert_modifier(conn, group_id: UUID, modifier, *, skip_quota_check: 
         ing_qty if option_type == "INGREDIENT" else None,
         ing_unit if option_type == "INGREDIENT" else None,
         modifier.recipe_base_type_id if option_type == "RECIPE" else None,
-        modifier.recipe_base_quantity if option_type == "RECIPE" else 1,
+        (recipe_store_qty if option_type == "RECIPE" else 1),
         modifier.linked_product_id if option_type == "PRODUCT" else None,
         modifier.linked_product_quantity if option_type == "PRODUCT" else 1,
     )
@@ -680,6 +710,10 @@ async def update_modifier_group(
                         validate_modifier_option_fields(modifier)
                         option_type = (modifier.option_type or "INGREDIENT").upper()
 
+                        # Normalize RECIPE quantity (2715)
+                        recipe_store_qty_upd = None
+                        if option_type == "RECIPE" and modifier.recipe_base_type_id:
+                            recipe_store_qty_upd = await _mod_display_to_store(conn, tenant_id, modifier.recipe_base_type_id, modifier.recipe_base_quantity)
                         ing_qty = modifier.ingredient_quantity
                         ing_unit = modifier.ingredient_unit
                         if modifier.ingredient_id and ing_qty is not None and ing_unit:
@@ -726,7 +760,7 @@ async def update_modifier_group(
                                 ing_qty if option_type == "INGREDIENT" else None,
                                 ing_unit if option_type == "INGREDIENT" else None,
                                 modifier.recipe_base_type_id if option_type == "RECIPE" else None,
-                                modifier.recipe_base_quantity if option_type == "RECIPE" else 1,
+                                (recipe_store_qty_upd if option_type == "RECIPE" else 1),
                                 modifier.linked_product_id if option_type == "PRODUCT" else None,
                                 modifier.linked_product_quantity if option_type == "PRODUCT" else 1,
                             )

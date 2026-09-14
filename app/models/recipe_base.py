@@ -52,6 +52,8 @@ class RecipeBaseTypeBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
     is_active: bool = True
+    rendimiento_total: Optional[float] = Field(None, ge=0)
+    unidad_rendimiento: Optional[str] = Field(None, max_length=10)
 
 
 class RecipeBaseTypeCreate(RecipeBaseTypeBase):
@@ -65,12 +67,15 @@ class RecipeBaseTypeUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = None
     is_active: Optional[bool] = None
+    rendimiento_total: Optional[float] = Field(None, ge=0)
+    unidad_rendimiento: Optional[str] = Field(None, max_length=10)
     ingredients: Optional[List[RecipeBaseIngredientCreate]] = None
 
 
 class RecipeBaseType(RecipeBaseTypeBase):
     """Full recipe base type model"""
     id: UUID
+    tenant_id: UUID
     created_at: datetime
     updated_at: datetime
 

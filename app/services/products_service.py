@@ -102,6 +102,8 @@ def _normalize_recipe_bases(
     Prefers `recipe_bases` (with explicit per-link quantity) when non-empty.
     Falls back to `recipe_base_ids` (each treated as quantity=1).
     Deduplication keeps the FIRST occurrence per recipe_base_id.
+    NOTE: quantities here are DISPLAY values (e.g. 80 gr). They are
+    converted to STORE fraction (80/800=0.1) in the DB layer before insert.
     """
     seen: dict = {}
     if recipe_bases:
@@ -115,6 +117,35 @@ def _normalize_recipe_bases(
                 seen[rid] = Decimal("1")
         return [(rid, qty) for rid, qty in seen.items()]
     return []
+
+
+async def _quantity_display_to_store(conn,tenant_id: UUID, bases: List[Tuple[UUID, Decimal]]) -> List[Tuple[UUID, Decimal]]:
+    """Convert display grams (80) to store fraction (0.1) using rendimiento_total.
+    No yield → keep as is. Keeps existing store logic if already <1."""
+    if not bases:
+        return bases
+    ids = [rid for rid,_ in bases]
+    rows = await conn.fetch("SELECT id, rendimiento_total FROM product_base_types WHERE id = ANY($1::uuid[]) AND tenant_id = $2", ids, tenant_id)
+    yield_map = {row['id']: row['rendimiento_total'] for row in rows}
+    out = []
+    for rid, qty in bases:
+        y = yield_map.get(rid)
+        if y is not None and Decimal(str(y)) > 0:
+            if qty >= Decimal("1"):
+                out.append((rid, qty / Decimal(str(y))))
+            else:
+                out.append((rid, qty))
+        else:
+            out.append((rid, qty))
+    return out
+
+def _quantity_store_to_display(store_qty: Decimal, rendimiento_total) -> Decimal:
+    """On read, convert store fraction to display grams for UI (0.1*800=80). Legacy 80 (>1) stays 80."""
+    if rendimiento_total is None or Decimal(str(rendimiento_total)) == 0:
+        return store_qty
+    if store_qty is not None and Decimal(store_qty) < Decimal("1") and Decimal(store_qty) > 0:
+        return (Decimal(store_qty) * Decimal(str(rendimiento_total))).quantize(Decimal("0.0001")).normalize()
+    return store_qty
 
 
 async def _resolve_resale_ingredient_category(
@@ -259,8 +290,9 @@ async def create_product_with_recipe(
                         projected_count=recipe_line_count,
                     )
 
-                # 2. Insert recipe base associations (with per-product quantity, Issue #517)
+                # 2. Insert recipe base associations (with per-product quantity, Issue #517) — normalize 80gr->0.1
                 if normalized_bases:
+                    normalized_bases = await _quantity_display_to_store(conn, tenant_id, normalized_bases)
                     base_recipe_query = """
                         INSERT INTO product_base_recipes (
                             product_id, product_base_type_id, tenant_id, quantity
@@ -580,8 +612,15 @@ async def get_product_by_id(
             product_dict.pop('station_color', None)
             product_dict['ingredients'] = [dict(row) for row in recipe_rows]
             product_dict['recipe_base_ids'] = [row['product_base_type_id'] for row in recipe_base_rows]
+            # Convert store fraction -> display grams (Kalex normalization #2710)
+            if recipe_base_rows:
+                r_ids = [r['product_base_type_id'] for r in recipe_base_rows]
+                y_rows = await connection.fetch("SELECT id, rendimiento_total FROM product_base_types WHERE id = ANY($1::uuid[]) AND tenant_id = $2", r_ids, tenant_id)
+                y_map = {r['id']: r['rendimiento_total'] for r in y_rows}
+            else:
+                y_map = {}
             product_dict['recipe_bases'] = [
-                {'recipe_base_id': row['product_base_type_id'], 'quantity': row['quantity']}
+                {'recipe_base_id': row['product_base_type_id'], 'quantity': float(_quantity_store_to_display(Decimal(str(row['quantity'])), y_map.get(row['product_base_type_id'])))} 
                 for row in recipe_base_rows
             ]
             product_dict['modifier_groups'] = modifier_groups
@@ -1331,8 +1370,9 @@ async def update_product_with_recipe(
                     delete_base_recipe_query = "DELETE FROM product_base_recipes WHERE product_id = $1"
                     await conn.execute(delete_base_recipe_query, product_id)
 
-                    # Insert new associations with per-product quantity
+                    # Insert new associations with per-product quantity — normalize display->store
                     if normalized_bases:
+                        normalized_bases = await _quantity_display_to_store(conn, tenant_id, normalized_bases)
                         base_recipe_query = """
                             INSERT INTO product_base_recipes (
                                 product_id, product_base_type_id, tenant_id, quantity

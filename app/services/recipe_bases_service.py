@@ -102,14 +102,16 @@ async def create_recipe_base_on_conn(
     await check_plan_quota_growth(conn, tenant_id, "recipe_bases")
     base_type_row = await conn.fetchrow(
         """
-        INSERT INTO product_base_types (name, description, is_active, tenant_id)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO product_base_types (name, description, is_active, tenant_id, rendimiento_total, unidad_rendimiento)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING id
         """,
         recipe_data.name,
         recipe_data.description,
         recipe_data.is_active,
         tenant_id,
+        getattr(recipe_data, 'rendimiento_total', None),
+        getattr(recipe_data, 'unidad_rendimiento', None),
     )
     base_type_id = base_type_row["id"]
 
@@ -262,7 +264,7 @@ async def get_recipe_base_types_list(
         async with get_db_connection(use_transaction=False) as conn:
             # Build query
             base_query = """
-                SELECT id, name, description, is_active, created_at, updated_at
+                SELECT id, name, description, is_active, rendimiento_total, unidad_rendimiento, tenant_id, created_at, updated_at
                 FROM product_base_types
                 WHERE tenant_id = $1
             """
@@ -356,7 +358,7 @@ async def get_recipe_base_type_by_id(
         async def _fetch(connection):
             # Fetch recipe base type
             base_query = """
-                SELECT id, name, description, is_active, created_at, updated_at
+                SELECT id, name, description, is_active, rendimiento_total, unidad_rendimiento, tenant_id, created_at, updated_at
                 FROM product_base_types
                 WHERE id = $1 AND tenant_id = $2
             """
@@ -445,6 +447,16 @@ async def update_recipe_base_type(
             params.append(update_data.is_active)
             param_count += 1
 
+        if 'rendimiento_total' in update_data.model_fields_set:
+            update_fields.append(f"rendimiento_total = ${param_count}")
+            params.append(update_data.rendimiento_total)
+            param_count += 1
+
+        if 'unidad_rendimiento' in update_data.model_fields_set:
+            update_fields.append(f"unidad_rendimiento = ${param_count}")
+            params.append(update_data.unidad_rendimiento)
+            param_count += 1
+
         async with get_db_connection() as conn:
             # Obtener snapshot ANTES de actualizar (para historial)
             old_snapshot = await menu_history_service.get_recipe_base_snapshot(conn, recipe_base_id, tenant_id)
@@ -460,7 +472,7 @@ async def update_recipe_base_type(
                     UPDATE product_base_types
                     SET {', '.join(update_fields)}
                     WHERE id = ${param_count} AND tenant_id = ${param_count + 1}
-                    RETURNING id, name, description, is_active, created_at, updated_at
+                    RETURNING id, name, description, is_active, rendimiento_total, unidad_rendimiento, tenant_id, created_at, updated_at
                 """
 
                 row = await conn.fetchrow(update_query, *params)
@@ -470,7 +482,7 @@ async def update_recipe_base_type(
             else:
                 # If no fields to update, just fetch the current data
                 fetch_query = """
-                    SELECT id, name, description, is_active, created_at, updated_at
+                    SELECT id, name, description, is_active, rendimiento_total, unidad_rendimiento, tenant_id, created_at, updated_at
                     FROM product_base_types
                     WHERE id = $1 AND tenant_id = $2
                 """
