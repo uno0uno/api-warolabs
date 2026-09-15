@@ -112,7 +112,9 @@ async def subscribe(body: SubscribeBody, request: Request):
     # Return page after LS pay: hosted checkout redirect; activation still from webhooks.
     parsed = urlparse(settings.frontend_url)
     frontend_host = f"{parsed.scheme}://{parsed.netloc}"
+    # MP requires valid public URL, not localhost — use warocol.com for MP in dev
     redirect_url = f"{frontend_host}/billing/confirmacion"
+    mp_redirect_url = "https://warocol.com/billing/confirmacion"
 
     async with get_db_connection() as conn:
         if is_pending_onboarding:
@@ -147,19 +149,15 @@ async def subscribe(body: SubscribeBody, request: Request):
             )
         else:
             if is_co:
-                from app.services import mercadopago_subscription_service
-                mp = await mercadopago_subscription_service.create_preapproval(
-                    payer_email=body.payer_email or ctx.get("email") or "",
-                    back_url=redirect_url,
-                    notification_url=f"{frontend_host}/payments/webhooks/mercadopago",
-                )
+                plan_id = getattr(settings, "mercadopago_preapproval_plan_id_test" if provider_environment=="test" else "mercadopago_preapproval_plan_id", None) or getattr(settings, "mercadopago_preapproval_plan_id", "1b289f4a52fc460b93582bc165b3d2c6")
+                init_point = f"https://www.mercadopago.com.co/subscriptions/checkout?preapproval_plan_id={plan_id}"
                 return await billing_service.subscribe_tenant(
                     conn,
                     tenant_id=tenant_id,
                     plan_id=body.plan_id,
                     billing_cycle=body.billing_cycle,
-                    checkout_url=mp["init_point"],
-                    gateway_reference=mp["preapproval_id"],
+                    checkout_url=init_point,
+                    gateway_reference=plan_id,
                     provider="mercadopago",
                 )
             ls_result = await lemon_squeezy_service.create_checkout(
@@ -182,13 +180,9 @@ async def subscribe(body: SubscribeBody, request: Request):
             )
 
     if is_co:
-        from app.services import mercadopago_subscription_service
-        mp = await mercadopago_subscription_service.create_preapproval(
-            payer_email=body.payer_email or "",
-            back_url=redirect_url,
-            notification_url=f"{frontend_host}/payments/webhooks/mercadopago",
-        )
-        ls_result = {"checkout_url": mp["init_point"], "gateway_reference": mp["preapproval_id"]}
+        plan_id = getattr(settings, "mercadopago_preapproval_plan_id_test" if provider_environment=="test" else "mercadopago_preapproval_plan_id", None) or getattr(settings, "mercadopago_preapproval_plan_id", "1b289f4a52fc460b93582bc165b3d2c6")
+        init_point = f"https://www.mercadopago.com.co/subscriptions/checkout?preapproval_plan_id={plan_id}"
+        ls_result = {"checkout_url": init_point, "gateway_reference": plan_id}
         provider_name = "mercadopago"
     else:
         ls_result = await lemon_squeezy_service.create_checkout(
