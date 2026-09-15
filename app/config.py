@@ -148,6 +148,7 @@ class Settings(BaseSettings):
     # MercadoPago — CO subscription COP 30k (#2700)
     mercadopago_access_token: str | None = Field(default=None, alias='MERCADOPAGO_ACCESS_TOKEN')
     mercadopago_webhook_secret: str | None = Field(default=None, alias='MERCADOPAGO_WEBHOOK_SECRET')
+    mercadopago_webhook_secret_test: str | None = Field(default=None, alias='MERCADOPAGO_WEBHOOK_SECRET_TEST')
     mercadopago_preapproval_plan_id: str | None = Field(default=None, alias='MERCADOPAGO_PREAPPROVAL_PLAN_ID')
     mercadopago_preapproval_plan_id_test: str | None = Field(default=None, alias='MERCADOPAGO_PREAPPROVAL_PLAN_ID_TEST')
     mercadopago_access_token_test: str | None = Field(default=None, alias='MERCADOPAGO_ACCESS_TOKEN_TEST')

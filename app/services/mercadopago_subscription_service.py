@@ -19,8 +19,10 @@ def _access_token(environment: str = "prod") -> Optional[str]:
     return getattr(settings, "mercadopago_access_token", None) or getattr(settings, "mercadopago_access_token_test", None)
 
 
-def _webhook_secret() -> Optional[str]:
-    return getattr(settings, "mercadopago_webhook_secret", None)
+def _webhook_secret(environment: str = "prod") -> Optional[str]:
+    if environment == "test":
+        return getattr(settings, "mercadopago_webhook_secret_test", None) or getattr(settings, "mercadopago_webhook_secret", None)
+    return getattr(settings, "mercadopago_webhook_secret", None) or getattr(settings, "mercadopago_webhook_secret_test", None)
 
 
 async def create_preapproval(
@@ -62,8 +64,8 @@ async def create_preapproval(
         }
 
 
-def verify_signature(*, raw_body: bytes, signature: Optional[str], request_id: Optional[str]) -> bool:
-    secret = _webhook_secret()
+def verify_signature(*, raw_body: bytes, signature: Optional[str], request_id: Optional[str], environment: str = "prod") -> bool:
+    secret = _webhook_secret(environment)
     if not secret:
         return True  # dev: no secret configured
     if not signature:
