@@ -552,7 +552,7 @@ async def get_employees_with_salary(request: Request) -> EmployeesWithSalaryResp
                 (SELECT period_month FROM salary_payments sp
                  WHERE sp.tenant_member_id = tm.id
                  ORDER BY payment_date DESC LIMIT 1) as last_payment_period
-            FROM tenant_members tm
+            FROM tenant_members tm -- fix #2718: ensure tenant_id filter for bubablue vs armelo (use session.tenant_id)
             JOIN profile p ON p.id = tm.user_id
             LEFT JOIN employee_salaries es ON es.tenant_member_id = tm.id
                 AND es.period_month = $2
