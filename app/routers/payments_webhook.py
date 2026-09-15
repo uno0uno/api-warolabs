@@ -81,10 +81,15 @@ async def mercadopago_webhook(request: Request, background_tasks: BackgroundTask
     """MercadoPago webhook for CO preapproval payments (#2700)."""
     raw = await request.body()
     # MP sends x-signature + x-request-id
-    ok = mercadopago_subscription_service.verify_signature(
-        raw_body=raw,
-        signature=request.headers.get("x-signature") or request.headers.get("X-Signature"),
-        request_id=request.headers.get("x-request-id") or request.headers.get("X-Request-Id"),
+    # Dual TEST/LIVE igual que LS — prueba ambos secrets (waro-colombia test en prod)
+    ok = any(
+        mercadopago_subscription_service.verify_signature(
+            raw_body=raw,
+            signature=request.headers.get("x-signature") or request.headers.get("X-Signature"),
+            request_id=request.headers.get("x-request-id") or request.headers.get("X-Request-Id"),
+            environment=env,
+        )
+        for env in ("test", "prod")
     )
     if not ok:
         from fastapi import HTTPException
