@@ -13,6 +13,7 @@ The previous `/admin/billing/*` router was deleted in #185 — those endpoints
 were dead code (no frontend consumer, no scripts) and a security risk under
 RBAC enforcement.
 """
+import json
 import logging
 from typing import Optional
 from uuid import UUID
@@ -459,8 +460,8 @@ async def confirm_mercadopago(request: Request, preapproval_id: str):
                 session.tenant_id,
             )
             await conn.execute(
-                "INSERT INTO billing_events (tenant_id, event_type, metadata) VALUES ($1,'payment_approved',$2)",
-                session.tenant_id, {"provider": "mercadopago", "preapproval_id": preapproval_id, "mp_status": mp_status},
+                "INSERT INTO billing_events (tenant_id, event_type, metadata) VALUES ($1,'payment_approved',$2::jsonb)",
+                session.tenant_id, json.dumps({"provider": "mercadopago", "preapproval_id": preapproval_id, "mp_status": mp_status}),
             )
         return {"status": "active", "preapproval_id": preapproval_id, "mp_status": mp_status}
     return {"status": mp_status or "pending", "preapproval_id": preapproval_id}
