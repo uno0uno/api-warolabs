@@ -1,0 +1,34 @@
+issue: 1022
+title: "feat(legal): render TyC as text with modal re-acceptance and remove onboarding TyC branch"
+repo: both
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: both
+branch: wr-1022-legal-text-modal
+paths:
+  - app/routers/legal.py
+  - app/services/legal_service.py
+  - app/core/onboarding_access.py
+  - front_nuxt/pages/terminos-y-condiciones.vue
+  - front_nuxt/composables/useLegalTerms.ts
+  - front_nuxt/components/LegalTermsReacceptModal.vue
+  - front_nuxt/layouts/default.vue
+ac:
+  - terminos-y-condiciones renders text (body_html/sections or metadata.body_html, display_mode=text) with PDF fallback; Accept not gated on .pdf
+  - modal on session start when GET /legal/terms/status requires_acceptance=true, CTA Ver detalle + Aceptar -> POST /legal/terms/accept, blocks billable actions
+  - freetrial flow 409 -> /terminos-y-condiciones -> accept -> pago intact
+  - remove onboarding branch in legal.py:82, deprecate terms_pending linkage
+  - GET /legal/terms/current exposes metadata body_html without breaking content_url
+out_of_scope:
+  - R2 content migration, annexes, audit
+hints:
+  entry: "GET /legal/terms/current, POST /legal/terms/accept, pages/terminos-y-condiciones.vue:60"
+  pattern: "legal.py:82 pending -> onboarding_service; terminos iframe pdfViewerUrl"
+  tests: "pytest tests/test_legal_terms_acceptance.py -q"
+risk:
+  sensitive: true
+  areas: ["legal", "auth", "billing"]
+skip:
+  audits: []
+next:
+  after_pr: "front split PR companion"
