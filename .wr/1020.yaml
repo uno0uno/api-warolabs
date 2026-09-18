@@ -1,0 +1,30 @@
+issue: 1020
+title: "fix(billing): make MP webhook activate idempotently and harden confirm fallback"
+repo: api_warocol.com
+repo_remote: uno0uno/api-warolabs
+cwd: /Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com
+stack: fastapi
+branch: wr-1020-mp-webhook-confirm
+paths:
+  - app/routers/payments_webhook.py
+  - app/routers/billing.py
+  - app/services/mercadopago_subscription_service.py
+ac:
+  - POST /payments/webhooks/mercadopago verifies x-signature+x-request-id test→prod and if preapproval authorized/active does UPDATE tenant_subscriptions status='active' idempotently + INSERT billing_events json.dumps ::jsonb
+  - GET /billing/confirm/mercadopago/{preapproval_id} no DataError (json.dumps ::jsonb) idempotent with webhook
+  - No 500 for preapproval 35c18b594ded4cd1a6e0a310e70544ea after Actualizar estado
+  - tenant_subscriptions active + billing_events payment_approved after MP test
+out_of_scope:
+  - Wompi/Lemon Squeezy
+  - webhook URL dev/prod split
+hints:
+  entry: "POST /payments/webhooks/mercadopago, GET /billing/confirm/mercadopago/{preapproval_id}"
+  pattern: "payments_webhook.py:80 verify_signature; billing.py:462 INSERT ::jsonb"
+  tests: "pytest -k billing -q 2>&1 | tail -n 20"
+risk:
+  sensitive: true
+  areas: ["payments", "webhooks", "billing"]
+skip:
+  audits: []
+next:
+  after_pr: "deploy warolabs-hostinger docker compose build web && up -d"
