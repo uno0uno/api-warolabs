@@ -459,10 +459,15 @@ async def confirm_mercadopago(request: Request, preapproval_id: str):
                 "UPDATE tenant_subscriptions SET status='active', current_period_end = NOW() + INTERVAL '30 days', updated_at=NOW() WHERE tenant_id=$1 AND status != 'active'",
                 session.tenant_id,
             )
-            await conn.execute(
-                "INSERT INTO billing_events (tenant_id, event_type, metadata) VALUES ($1,'payment_approved',$2::jsonb)",
-                session.tenant_id, json.dumps({"provider": "mercadopago", "preapproval_id": preapproval_id, "mp_status": mp_status}),
+            exists = await conn.fetchval(
+                "SELECT 1 FROM billing_events WHERE tenant_id=$1 AND event_type='payment_approved' AND metadata->>'preapproval_id'=$2 LIMIT 1",
+                session.tenant_id, preapproval_id,
             )
+            if not exists:
+                await conn.execute(
+                    "INSERT INTO billing_events (tenant_id, event_type, metadata) VALUES ($1,'payment_approved',$2::jsonb)",
+                    session.tenant_id, json.dumps({"provider": "mercadopago", "preapproval_id": preapproval_id, "mp_status": mp_status, "source": "confirm"}),
+                )
         return {"status": "active", "preapproval_id": preapproval_id, "mp_status": mp_status}
     return {"status": mp_status or "pending", "preapproval_id": preapproval_id}
 
