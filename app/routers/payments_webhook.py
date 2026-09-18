@@ -128,7 +128,8 @@ async def mercadopago_webhook(request: Request, background_tasks: BackgroundTask
                 except Exception as e:
                     logger.warning("MP webhook get_preapproval %s env=%s err=%s", preapproval_id, env, e)
             if mp_data and mp_status in ("authorized", "active"):
-                payer_email = (mp_data.get("payer_email") or mp_data.get("payer", {}).get("email") or "").strip().lower() if isinstance(mp_data.get("payer"), dict) else (mp_data.get("payer_email") or "").strip().lower()
+                payer_obj = mp_data.get("payer") if isinstance(mp_data.get("payer"), dict) else {}
+                payer_email = (mp_data.get("payer_email") or payer_obj.get("email") or "").strip().lower()
                 tenant_id = None
                 if payer_email:
                     async with get_db_connection(use_transaction=False) as conn:
@@ -138,7 +139,6 @@ async def mercadopago_webhook(request: Request, background_tasks: BackgroundTask
                         if row:
                             tenant_id = row["id"]
                         else:
-                            # fallback: tenant_sites brand lookup or onboarding attempt payer
                             row2 = await conn.fetchrow(
                                 """
                                 SELECT tenant_id FROM onboarding_payment_attempts
@@ -154,21 +154,25 @@ async def mercadopago_webhook(request: Request, background_tasks: BackgroundTask
                             "UPDATE tenant_subscriptions SET status='active', current_period_end = NOW() + INTERVAL '30 days', updated_at=NOW() WHERE tenant_id=$1 AND status != 'active'",
                             tenant_id,
                         )
-                        # dedupe billing_events per preapproval
-                        exists = await conn.fetchval(
-                            "SELECT 1 FROM billing_events WHERE tenant_id=$1 AND event_type='payment_approved' AND metadata->>'preapproval_id'=$2 LIMIT 1",
-                            tenant_id, preapproval_id,
-                        )
-                        if not exists:
-                            await conn.execute(
-                                "INSERT INTO billing_events (tenant_id, event_type, metadata) VALUES ($1,'payment_approved',$2::jsonb)",
-                                tenant_id,
-                                json.dumps({"provider": "mercadopago", "preapproval_id": preapproval_id, "mp_status": mp_status, "env": mp_env_used, "source": "webhook"}),
+                        # atomic dedupe: single-statement insert-if-not-exists (#1020 race)
+                        await conn.execute(
+                            """
+                            INSERT INTO billing_events (tenant_id, event_type, metadata)
+                            SELECT $1, 'payment_approved', $2::jsonb
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM billing_events
+                                WHERE tenant_id=$1 AND event_type='payment_approved' AND metadata->>'preapproval_id'=$3
                             )
+                            """,
+                            tenant_id,
+                            json.dumps({"provider": "mercadopago", "preapproval_id": preapproval_id, "mp_status": mp_status, "env": mp_env_used, "source": "webhook"}),
+                            preapproval_id,
+                        )
                     logger.info("MP webhook activated tenant=%s preapproval=%s status=%s", tenant_id, preapproval_id, mp_status)
                     return {"received": True, "provider": "mercadopago", "activated": True, "preapproval_id": preapproval_id}
                 else:
                     logger.warning("MP webhook no tenant for payer_email=%s preapproval=%s", payer_email, preapproval_id)
     except Exception as e:
-        logger.warning("MP webhook handler error preapproval=%s err=%s", payload.get("data", {}).get("id") if isinstance(payload.get("data"), dict) else None, e)
+        logger.exception("MP webhook handler error preapproval=%s err=%s", payload.get("data", {}).get("id") if isinstance(payload.get("data"), dict) else payload.get("id"), e)
+        # still ack 200 to avoid MP retry storm; activation will be retried via confirm fallback
     return {"received": True, "provider": "mercadopago"}
