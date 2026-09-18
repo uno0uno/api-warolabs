@@ -1,0 +1,40 @@
+# Compact Codex plan for wr-fast / wr-exec. Keep <=80 lines.
+issue: 1019
+title: "fix(cierre): filter cartera abonos by tenant timezone window for shift closing"
+repo: api-warolabs
+repo_remote: uno0uno/api-warolabs
+cwd: "/Users/saifer/Documents/WEBS/WARO COLOMBIA/api_warocol.com"
+stack: fastapi
+branch: wr-1019-cierre-timezone-abonos
+
+paths:
+  - app/services/cierre_service.py
+  - app/services/credit_service.py
+  - app/routers/cierre.py
+
+ac:
+  - /cierre/preview y /cierre/close filtran credit_payments por ventana opened_at/closed_at en tenant timezone (America/Bogota)
+  - Abono 16/9 20:41 COT queda en turno 16/9 19:05->02:11, no se arrastra al 17/9
+  - Bubablue cierre del 17/9 cuadra sin abono previo arrastrado
+
+out_of_scope:
+  - mover abonos a Total ventas
+  - UI Movimiento neto
+
+hints:
+  entry: "app/services/cierre_service.py: preview/close filtra credit_payments por payment_date"
+  pattern: "cierre_service usa payment_date >= opened_at AND < closed_at sin conversion; tenant.timezone America/Bogota"
+  tests: "pytest app/tests/test_cierre* app/tests/test_credit* -q"
+
+risk:
+  sensitive: false
+  areas:
+    - cierre ventana timezone
+
+skip:
+  audits:
+    - no infra
+
+next:
+  after_pr: "verificar bubablue 16/9 vs 17/9 no arrastra"
+
