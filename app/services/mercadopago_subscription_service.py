@@ -64,6 +64,21 @@ async def create_preapproval(
         }
 
 
+async def get_preapproval_status(*, preapproval_id: str, environment: str = "prod") -> dict | None:
+    token = _access_token(environment)
+    if not token:
+        return None
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            f"{MP_API}/{preapproval_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()
+
+
 def verify_signature(*, raw_body: bytes, signature: Optional[str], request_id: Optional[str], environment: str = "prod") -> bool:
     secret = _webhook_secret(environment)
     if not secret:

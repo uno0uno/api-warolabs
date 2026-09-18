@@ -437,6 +437,35 @@ async def get_access_status(request: Request):
         }
 
 
+@tenant_router.get("/confirm/mercadopago/{preapproval_id}")
+async def confirm_mercadopago(request: Request, preapproval_id: str):
+    """Fallback confirmation when webhook missed — verifies MP preapproval directly (#2723)."""
+    session = require_valid_session(request)
+    from app.services import mercadopago_subscription_service
+
+    # Resolve environment per tenant (waro-colombia test in prod)
+    env = "test" if str(session.tenant_id) == "93b3e582-34fa-44a6-8d0f-bf82a3608727" or settings.lemon_squeezy_environment == "sandbox" else "prod"
+    # Try test first for CO, fallback to prod
+    data = await mercadopago_subscription_service.get_preapproval_status(preapproval_id=preapproval_id, environment=env)
+    if not data and env == "test":
+        data = await mercadopago_subscription_service.get_preapproval_status(preapproval_id=preapproval_id, environment="prod")
+    if not data:
+        return {"status": "pending", "preapproval_id": preapproval_id}
+    mp_status = (data.get("status") or "").lower()
+    if mp_status in ("authorized", "active"):
+        async with get_db_connection() as conn:
+            await conn.execute(
+                "UPDATE tenant_subscriptions SET status='active', current_period_end = NOW() + INTERVAL '30 days', updated_at=NOW() WHERE tenant_id=$1 AND status != 'active'",
+                session.tenant_id,
+            )
+            await conn.execute(
+                "INSERT INTO billing_events (tenant_id, event_type, metadata) VALUES ($1,'payment_approved',$2)",
+                session.tenant_id, {"provider": "mercadopago", "preapproval_id": preapproval_id, "mp_status": mp_status},
+            )
+        return {"status": "active", "preapproval_id": preapproval_id, "mp_status": mp_status}
+    return {"status": mp_status or "pending", "preapproval_id": preapproval_id}
+
+
 # NOTE: Cron endpoint authenticated by X-Cron-Secret header, not session.
 # Do NOT add require_module() here — it would break the grace-reminder job
 # that runs from cron-job.org.
