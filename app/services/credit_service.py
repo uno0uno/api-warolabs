@@ -651,6 +651,7 @@ async def fetch_credit_payment_breakdown_for_cierre(
     period_end: date,
     period_start_time: Optional[datetime] = None,
     period_end_time: Optional[datetime] = None,
+    timezone_name: str = "America/Bogota",
 ) -> List[Dict[str, Any]]:
     """Per-method cartera abono rows for arqueo payment breakdown."""
     return await _fetch_credit_payment_cierre_rows(
@@ -660,6 +661,7 @@ async def fetch_credit_payment_breakdown_for_cierre(
         period_end,
         period_start_time,
         period_end_time,
+        timezone_name,
     )
 
 
@@ -670,6 +672,7 @@ async def _fetch_credit_payment_cierre_rows(
     period_end: date,
     period_start_time: Optional[datetime] = None,
     period_end_time: Optional[datetime] = None,
+    timezone_name: str = "America/Bogota",
 ) -> List[Dict[str, Any]]:
     if period_start_time and period_end_time:
         rows = await conn.fetch(
@@ -701,13 +704,14 @@ async def _fetch_credit_payment_cierre_rows(
             LEFT JOIN payment_methods pm ON pm.id = cp.payment_method_id
             WHERE cp.tenant_id = $1
               AND cp.payment_method IS NOT NULL
-              AND cp.payment_date::date >= $2
-              AND cp.payment_date::date <= $3
+              AND (cp.payment_date AT TIME ZONE $4)::date >= $2
+              AND (cp.payment_date AT TIME ZONE $4)::date <= $3
             GROUP BY cp.payment_method, COALESCE(pm.name, cp.payment_method)
             """,
             tenant_id,
             period_start,
             period_end,
+            timezone_name,
         )
     return [
         {

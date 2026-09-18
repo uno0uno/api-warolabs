@@ -2145,6 +2145,7 @@ async def _compute_breakdown_rows(
         period_end,
         period_start_time,
         period_end_time,
+        timezone_name,
     )
     for row in credit_rows:
         total = float(row["total"])
